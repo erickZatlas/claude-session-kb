@@ -39,8 +39,9 @@ immediately**; semantic search switches on once indexing finishes. The index is 
   API is always current. Semantic queries are embedded **server-side** — no model in the browser.
 - **SSE for freshness only.** Search is plain request/response; `/api/stream` pushes a `refresh`
   event when claude-mem gains new entries, and the page re-runs the current view automatically.
-- **The graph is view-scoped** — it draws the current results (or a selected session's records)
-  plus files/concepts shared by ≥2 of them, so it stays responsive over thousands of records.
+- **The graph is a session map, not a result dump.** By default it shows your sessions as nodes
+  (sized by activity), linked when they share files — an overview of your work. Click a session to
+  drill into its observations; a search scopes the map to the sessions that contain the hits.
 
 ## API
 
@@ -50,6 +51,7 @@ immediately**; semantic search switches on once indexing finishes. The index is 
 | `GET /api/search?q=&project=&kind=&mode=keyword\|semantic&session=&limit=` | ranked records |
 | `GET /api/record/{id}` | one record + its session |
 | `GET /api/sessions?project=` | sessions |
+| `GET /api/graph?project=` | session-overview nodes + shared-file links |
 | `GET /api/stream` | SSE; `refresh` when claude-mem grows, else `ping` |
 
 ## Files

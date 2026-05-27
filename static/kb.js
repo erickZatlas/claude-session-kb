@@ -171,7 +171,7 @@
           : "",
     );
     renderResults(currentRecs);
-    renderGraph(currentRecs);
+    await renderGraphView();
     renderDetail();
   }
 
@@ -299,13 +299,14 @@
   function selectRecord(id) {
     state.selectedRecId = id;
     const r = recById.get(id);
-    state.selectedSessId = r ? r.sessionId : null;
     document
       .querySelectorAll(".result")
       .forEach((x) => x.classList.toggle("sel", x.dataset.id === id));
     const sel = document.querySelector(".result.sel");
     if (sel) sel.scrollIntoView({ block: "nearest" });
-    setActive(id);
+    // highlight the matching node: the record itself when drilled into a session,
+    // otherwise its session node on the overview map
+    setActive(state.selectedSessId ? id : r ? "S:" + r.sessionId : null);
     renderDetail();
   }
   function selectSession(sessId) {
@@ -326,6 +327,71 @@
     svgSel = null,
     rootG = null;
 
+  // ---- session-overview map (cached per project) ----
+  let graphCache = { project: null, data: null };
+  async function ensureGraph(project) {
+    if (graphCache.project === project && graphCache.data)
+      return graphCache.data;
+    const data = await api("/api/graph?project=" + encodeURIComponent(project));
+    graphCache = { project, data };
+    return data;
+  }
+  function invalidateGraphCache() {
+    graphCache = { project: null, data: null };
+  }
+
+  // Default overview: top sessions as nodes (sized by activity), linked by shared files.
+  function buildOverview(gd) {
+    const ids = new Set(gd.nodes.map((s) => s.id));
+    const nodes = gd.nodes.map((s) => ({
+      id: "S:" + s.id,
+      ref: s.id,
+      kind: "session",
+      label: truncate(s.title, 30),
+      color: SESSION_COLOR,
+      r: Math.min(18, 6 + Math.sqrt(s.obsCount || 1)),
+    }));
+    const links = gd.links
+      .filter((l) => ids.has(l.source) && ids.has(l.target))
+      .map((l) => ({
+        source: "S:" + l.source,
+        target: "S:" + l.target,
+        kind: "shared",
+        weight: l.weight,
+      }));
+    return { nodes, links };
+  }
+
+  // Search overview: just the sessions that own the current hits, sized by hit count.
+  function buildSearchOverview() {
+    const hits = new Map();
+    currentRecs.forEach((r) => {
+      if (r.sessionId) hits.set(r.sessionId, (hits.get(r.sessionId) || 0) + 1);
+    });
+    const ids = new Set(hits.keys());
+    const nodes = [...hits.entries()].map(([sid, c]) => {
+      const s = sessByContentId.get(sid);
+      return {
+        id: "S:" + sid,
+        ref: sid,
+        kind: "session",
+        label: truncate(s ? s.title : "session", 30),
+        color: SESSION_COLOR,
+        r: Math.min(18, 6 + Math.sqrt(c * 3)),
+      };
+    });
+    const links = (graphCache.data ? graphCache.data.links : [])
+      .filter((l) => ids.has(l.source) && ids.has(l.target))
+      .map((l) => ({
+        source: "S:" + l.source,
+        target: "S:" + l.target,
+        kind: "shared",
+        weight: l.weight,
+      }));
+    return { nodes, links };
+  }
+
+  // Drill-down: one session expanded into its observations + the files they share.
   function buildSubgraph(recs) {
     const focus = recs.slice(0, 40);
     const nodes = new Map(),
@@ -334,14 +400,13 @@
       if (!nodes.has(id)) nodes.set(id, Object.assign({ id }, o));
       return nodes.get(id);
     };
-
     new Set(focus.map((r) => r.sessionId).filter(Boolean)).forEach((sid) => {
       const s = sessByContentId.get(sid);
       addNode("S:" + sid, {
         kind: "session",
-        label: s ? truncate(s.title, 28) : "session",
+        label: s ? truncate(s.title, 30) : "session",
         color: SESSION_COLOR,
-        r: 9,
+        r: 12,
         ref: sid,
       });
     });
@@ -365,18 +430,7 @@
       nodes,
       links,
       addNode,
-      25,
-    );
-    addSharedConnectors(
-      focus,
-      "concepts",
-      "C:",
-      CONCEPT_COLOR,
-      (x) => x,
-      nodes,
-      links,
-      addNode,
-      25,
+      18,
     );
     return { nodes: [...nodes.values()], links };
   }
@@ -417,8 +471,28 @@
       });
   }
 
-  function renderGraph(recs) {
-    const g = buildSubgraph(recs);
+  // Decide which graph to show: drill-down (a session selected), search overview
+  // (a query active), or the default session map.
+  async function renderGraphView() {
+    const resetBtn = $("#reset-graph");
+    if (state.selectedSessId) {
+      if (resetBtn) resetBtn.textContent = "← all sessions";
+      return renderForce(buildSubgraph(currentRecs), { labelAll: false });
+    }
+    if (resetBtn) resetBtn.textContent = "Reset view";
+    if (state.query)
+      return renderForce(buildSearchOverview(), { labelAll: true });
+    let gd;
+    try {
+      gd = await ensureGraph(state.project);
+    } catch (e) {
+      gd = { nodes: [], links: [] };
+    }
+    renderForce(buildOverview(gd), { labelAll: true });
+  }
+
+  function renderForce(g, opts) {
+    opts = opts || {};
     const wrap = $("#graph-wrap");
     const W = wrap.clientWidth || 600,
       H = wrap.clientHeight || 500;
@@ -447,7 +521,13 @@
       .enter()
       .append("line")
       .attr("class", "glink")
-      .attr("stroke-width", (d) => (d.kind === "owns" ? 1.3 : 0.8))
+      .attr("stroke-width", (d) =>
+        d.kind === "shared"
+          ? Math.min(4, 1 + (d.weight || 1) * 0.5)
+          : d.kind === "owns"
+            ? 1.3
+            : 0.8,
+      )
       .attr("stroke-dasharray", (d) =>
         d.kind === "files" || d.kind === "concepts" ? "3,3" : null,
       );
@@ -474,9 +554,11 @@
       .append("text")
       .attr("x", (d) => d.r + 4)
       .attr("dy", "0.32em")
-      // labels are noise at scale: show only session anchors by default,
-      // reveal the rest on hover/selection via setActive()
-      .style("display", (d) => (d.kind === "session" ? null : "none"))
+      // overview labels every (session) node; drill-down labels only the session
+      // anchor by default and reveals the rest on hover/selection via setActive()
+      .style("display", (d) =>
+        opts.labelAll || d.kind === "session" ? null : "none",
+      )
       .text((d) => d.label);
     node
       .style("cursor", "pointer")
@@ -509,16 +591,18 @@
         d3
           .forceLink(g.links)
           .id((d) => d.id)
-          .distance((d) => (d.kind === "owns" ? 60 : 95))
-          .strength(0.35),
+          .distance((d) =>
+            d.kind === "owns" ? 55 : d.kind === "shared" ? 130 : 90,
+          )
+          .strength(0.3),
       )
-      .force("charge", d3.forceManyBody().strength(-280))
+      .force("charge", d3.forceManyBody().strength(-340))
       .force("center", d3.forceCenter(W / 2, H / 2))
-      .force("x", d3.forceX(W / 2).strength(0.04))
-      .force("y", d3.forceY(H / 2).strength(0.04))
+      .force("x", d3.forceX(W / 2).strength(0.05))
+      .force("y", d3.forceY(H / 2).strength(0.05))
       .force(
         "collide",
-        d3.forceCollide().radius((d) => d.r + 16),
+        d3.forceCollide().radius((d) => d.r + 18),
       )
       .on("tick", () => {
         link
@@ -557,6 +641,15 @@
   function setActive(nodeId) {
     if (!rootG) return;
     const linkId = (e) => (typeof e === "object" ? e.id : e);
+    // if the target isn't in the current graph, clear rather than blanking everything
+    if (
+      nodeId &&
+      !rootG
+        .selectAll(".gnode")
+        .data()
+        .some((d) => d.id === nodeId)
+    )
+      nodeId = null;
     const neighbors = new Set();
     if (nodeId) {
       neighbors.add(nodeId);
@@ -624,6 +717,7 @@
       meta.projects = m.projects;
       setCounts();
       flashFresh();
+      invalidateGraphCache(); // session map may have changed
       refresh(); // backend already reloaded; re-run current view
     });
     es.addEventListener("ping", (e) => {

@@ -113,6 +113,12 @@ def api_record(rec_id: str):
     return out
 
 
+@app.get("/api/graph")
+def api_graph(project: str = "all"):
+    store.ensure_fresh()
+    return store.session_graph(project)
+
+
 @app.get("/api/sessions")
 def api_sessions(project: str = "all"):
     s = store.sessions if project == "all" else [x for x in store.sessions if x["project"] == project]

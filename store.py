@@ -202,6 +202,34 @@ class Store:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [r for _, r in scored[:limit]]
 
+    def session_graph(self, project="all", max_sessions=40, max_share=8, max_links=80) -> dict:
+        """Session-level overview: top sessions as nodes, linked when they share a
+        (reasonably specific) file. Files touched by many sessions are skipped — they
+        don't tell you anything. Concepts are ignored here (claude-mem's are generic tags)."""
+        sess = [s for s in self.sessions if project in ("all", None) or s["project"] == project]
+        sess = sorted(sess, key=lambda s: s["obsCount"], reverse=True)[:max_sessions]
+        keep = {s["id"] for s in sess}
+        file_sessions: dict[str, set] = {}
+        for r in self.records:
+            sid = r.get("sessionId")
+            if sid in keep:
+                for f in r["files"]:
+                    file_sessions.setdefault(f, set()).add(sid)
+        weight: dict[tuple, int] = {}
+        for f, sids in file_sessions.items():
+            if 2 <= len(sids) <= max_share:
+                s = sorted(sids)
+                for i in range(len(s)):
+                    for j in range(i + 1, len(s)):
+                        weight[(s[i], s[j])] = weight.get((s[i], s[j]), 0) + 1
+        links = sorted(
+            ({"source": a, "target": b, "weight": w} for (a, b), w in weight.items()),
+            key=lambda l: l["weight"], reverse=True,
+        )[:max_links]
+        nodes = [{"id": s["id"], "title": s["title"], "project": s["project"], "obsCount": s["obsCount"]}
+                 for s in sess]
+        return {"nodes": nodes, "links": links}
+
     def meta(self) -> dict:
         return {
             "counts": {
