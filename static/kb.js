@@ -305,7 +305,7 @@
       .forEach((x) => x.classList.toggle("sel", x.dataset.id === id));
     const sel = document.querySelector(".result.sel");
     if (sel) sel.scrollIntoView({ block: "nearest" });
-    highlightGraph(id);
+    setActive(id);
     renderDetail();
   }
   function selectSession(sessId) {
@@ -327,7 +327,7 @@
     rootG = null;
 
   function buildSubgraph(recs) {
-    const focus = recs.slice(0, 70);
+    const focus = recs.slice(0, 40);
     const nodes = new Map(),
       links = [];
     const addNode = (id, o) => {
@@ -465,17 +465,24 @@
       .attr("r", (d) => d.r)
       .attr("fill", (d) => d.color)
       .attr("stroke", (d) => d.color)
-      .attr("stroke-opacity", 0.5)
+      .attr("stroke-opacity", 0.45)
       .style(
         "filter",
-        (d) => `drop-shadow(0 0 ${Math.max(3, d.r * 0.8)}px ${d.color}aa)`,
+        (d) => `drop-shadow(0 0 ${Math.max(2, d.r * 0.45)}px ${d.color}55)`,
       );
     node
       .append("text")
-      .attr("x", (d) => d.r + 3)
+      .attr("x", (d) => d.r + 4)
       .attr("dy", "0.32em")
+      // labels are noise at scale: show only session anchors by default,
+      // reveal the rest on hover/selection via setActive()
+      .style("display", (d) => (d.kind === "session" ? null : "none"))
       .text((d) => d.label);
-    node.style("cursor", "pointer").on("click", (e, d) => onNodeClick(d));
+    node
+      .style("cursor", "pointer")
+      .on("click", (e, d) => onNodeClick(d))
+      .on("mouseenter", (e, d) => setActive(d.id))
+      .on("mouseleave", () => setActive(state.selectedRecId));
     node.call(
       d3
         .drag()
@@ -502,14 +509,16 @@
         d3
           .forceLink(g.links)
           .id((d) => d.id)
-          .distance((d) => (d.kind === "owns" ? 38 : 60))
-          .strength(0.4),
+          .distance((d) => (d.kind === "owns" ? 60 : 95))
+          .strength(0.35),
       )
-      .force("charge", d3.forceManyBody().strength(-140))
+      .force("charge", d3.forceManyBody().strength(-280))
       .force("center", d3.forceCenter(W / 2, H / 2))
+      .force("x", d3.forceX(W / 2).strength(0.04))
+      .force("y", d3.forceY(H / 2).strength(0.04))
       .force(
         "collide",
-        d3.forceCollide().radius((d) => d.r + 6),
+        d3.forceCollide().radius((d) => d.r + 16),
       )
       .on("tick", () => {
         link
@@ -520,7 +529,7 @@
         node.attr("transform", (d) => `translate(${d.x},${d.y})`);
       });
     svgSel.transition().duration(300).call(gZoom.transform, d3.zoomIdentity);
-    if (state.selectedRecId) highlightGraph(state.selectedRecId);
+    setActive(state.selectedRecId);
   }
 
   function onNodeClick(d) {
@@ -542,30 +551,39 @@
     selectRecord(d.ref);
   }
 
-  function highlightGraph(recId) {
+  // Focus a node by its graph id (record id for obs/sum, "S:"+sid for sessions, etc.).
+  // Dims everything outside its neighborhood and reveals labels for it + neighbors.
+  // Pass null/undefined to clear (back to: only session labels shown).
+  function setActive(nodeId) {
     if (!rootG) return;
-    const neighbors = new Set([recId]);
-    rootG.selectAll(".glink").each(function (d) {
-      const s = nodeRef(d.source.id || d.source),
-        t = nodeRef(d.target.id || d.target);
-      if (s === recId || t === recId) {
-        neighbors.add(s);
-        neighbors.add(t);
-      }
-    });
+    const linkId = (e) => (typeof e === "object" ? e.id : e);
+    const neighbors = new Set();
+    if (nodeId) {
+      neighbors.add(nodeId);
+      rootG.selectAll(".glink").each(function (d) {
+        const s = linkId(d.source),
+          t = linkId(d.target);
+        if (s === nodeId || t === nodeId) {
+          neighbors.add(s);
+          neighbors.add(t);
+        }
+      });
+    }
     rootG
       .selectAll(".gnode")
-      .classed("dim", (d) => !neighbors.has(d.ref || d.id))
-      .classed("sel", (d) => (d.ref || d.id) === recId);
+      .classed("dim", (d) => (nodeId ? !neighbors.has(d.id) : false))
+      .classed("sel", (d) => d.id === nodeId);
+    rootG
+      .selectAll(".gnode text")
+      .style("display", (d) =>
+        d.kind === "session" || (nodeId && neighbors.has(d.id)) ? null : "none",
+      );
     rootG.selectAll(".glink").classed("dim", (d) => {
-      const s = nodeRef(d.source.id || d.source),
-        t = nodeRef(d.target.id || d.target);
-      return !(s === recId || t === recId);
+      if (!nodeId) return false;
+      const s = linkId(d.source),
+        t = linkId(d.target);
+      return !(s === nodeId || t === nodeId);
     });
-  }
-  function nodeRef(idOrNode) {
-    if (typeof idOrNode === "object") return idOrNode.ref || idOrNode.id;
-    return idOrNode.startsWith("S:") ? idOrNode.slice(2) : idOrNode;
   }
 
   function buildLegend() {
