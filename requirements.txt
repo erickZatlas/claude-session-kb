@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn>=0.29
+numpy>=1.26
+# semantic search (query + document embedding); torch is the heavy one
+transformers>=4.40
+torch>=2.2

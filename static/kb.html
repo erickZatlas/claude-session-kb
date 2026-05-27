@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Knowledge Base</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="theme.css">
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+</head>
+<body>
+
+<header class="kb-header">
+  <span class="kb-logo">&#x25E2; Claude KB</span>
+  <span class="kb-meta" id="kb-counts">loading…</span>
+  <span class="spacer"></span>
+  <a href="index.html">&larr; Workflow &amp; concepts</a>
+</header>
+
+<div class="kb-toolbar">
+  <input id="search" class="kb-search" type="search" placeholder="Search observations, summaries, facts, concepts, files…" autocomplete="off">
+  <select id="proj-filter" class="kb-select"></select>
+  <span class="chips">
+    <span class="chip active" data-kind="all">all</span>
+    <span class="chip" data-kind="observations">observations</span>
+    <span class="chip" data-kind="summaries">summaries</span>
+  </span>
+  <span class="chips" id="mode-chips" title="keyword = substring match; semantic = search by meaning (embedded server-side)">
+    <span class="chip active" data-mode="keyword">keyword</span>
+    <span class="chip" data-mode="semantic">semantic</span>
+  </span>
+  <span class="kb-meta" id="sem-status"></span>
+</div>
+
+<div class="kb-main">
+  <!-- Graph -->
+  <section class="pane pane-graph">
+    <div class="pane-title">
+      Knowledge graph
+      <span class="spacer"></span>
+      <button id="reset-graph" class="btn">Reset view</button>
+    </div>
+    <div class="graph-wrap" id="graph-wrap">
+      <svg id="graph"></svg>
+      <div class="graph-empty" id="graph-empty">No nodes in view — adjust filters or search.</div>
+    </div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <!-- Results -->
+  <section class="pane pane-results">
+    <div class="pane-title">Results <span class="count">(<span id="results-count">0</span>)</span></div>
+    <div class="results" id="results"></div>
+  </section>
+
+  <!-- Detail -->
+  <section class="pane pane-detail">
+    <div class="pane-title">Detail</div>
+    <div class="detail placeholder" id="detail">Select a result or a node to see its full content.</div>
+  </section>
+</div>
+
+<script src="kb.js"></script>
+</body>
+</html>
