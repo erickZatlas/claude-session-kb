@@ -22,6 +22,7 @@
     project: "all",
     kind: "all",
     mode: "keyword",
+    sortMode: "recent", // "recent" | "activity" (overview session cards only)
     selectedRecId: null,
     selectedSessId: null,
   };
@@ -185,6 +186,18 @@
       }),
     );
 
+    // sort toggle (session-card overview only)
+    document.querySelectorAll(".chip[data-sort]").forEach((c) =>
+      c.addEventListener("click", () => {
+        document
+          .querySelectorAll(".chip[data-sort]")
+          .forEach((x) => x.classList.remove("active"));
+        c.classList.add("active");
+        state.sortMode = c.dataset.sort;
+        renderCards(); // pure re-render; no fetch needed
+      }),
+    );
+
     $("#reset-graph").addEventListener("click", () => {
       clearSelection();
       refresh();
@@ -243,7 +256,9 @@
           ? "building semantic index… (keyword for now)"
           : "",
     );
-    renderResults(currentRecs);
+    // In overview the cards own #results (rendered by renderGraphView -> renderCards).
+    // In drill-down the existing renderResults rows fill the records pane.
+    if (state.selectedSessId) renderResults(currentRecs);
     await renderGraphView();
     renderDetail();
   }
@@ -442,217 +457,164 @@
     svgSel = null,
     rootG = null;
 
-  // ---- overview: timeline with project swimlanes ----
-  // Pick which sessions to render: project-filtered, narrowed to hit-sessions when a
-  // query is active (sized by hit count instead of obsCount in that case).
-  function timelineSessions() {
+  // ---- overview: search-first card list ----
+  // Two flavours, picked by state.query:
+  //   • no query  -> session cards (sorted by recent | activity)
+  //   • query     -> record cards (the API's ranked results, one card per hit)
+  function relativeAgo(iso) {
+    if (!iso) return "";
+    const t = new Date(iso).getTime();
+    if (isNaN(t)) return "";
+    const s = Math.max(1, Math.floor((Date.now() - t) / 1000));
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    if (s < 86400 * 14) return Math.floor(s / 86400) + "d ago";
+    if (s < 86400 * 60) return Math.floor(s / (86400 * 7)) + "w ago";
+    return Math.floor(s / (86400 * 30)) + "mo ago";
+  }
+
+  function sessionCardsData() {
     let pool = [...sessByContentId.values()];
     if (state.project !== "all")
       pool = pool.filter((s) => s.project === state.project);
-    if (state.query) {
-      const hits = new Map();
-      currentRecs.forEach((r) => {
-        if (r.sessionId)
-          hits.set(r.sessionId, (hits.get(r.sessionId) || 0) + 1);
-      });
-      pool = pool
-        .filter((s) => hits.has(s.id))
-        .map((s) => Object.assign({}, s, { hitCount: hits.get(s.id) }));
+    if (state.sortMode === "activity") {
+      pool.sort((a, b) => (b.obsCount || 0) - (a.obsCount || 0));
+    } else {
+      pool.sort((a, b) => (b.started || "").localeCompare(a.started || ""));
     }
     return pool;
   }
 
-  let tZoom = null;
-  function renderTimeline(sessions) {
-    const wrap = $("#graph-wrap");
-    const W = wrap.clientWidth || 1000,
-      H = wrap.clientHeight || 500;
+  function renderCards() {
+    const list = $("#results");
+    list.innerHTML = "";
+    const isSearching = !!state.query;
+    if (isSearching) {
+      // Record cards from currentRecs (the API's ranked /api/search hits)
+      $("#results-count").textContent = currentRecs.length;
+      $("#pane-title-label").textContent = "Results";
+      if (!currentRecs.length) {
+        list.appendChild(
+          el(
+            "div",
+            "empty",
+            "No matches. Try a different term or widen the project filter.",
+          ),
+        );
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      currentRecs.forEach((r) => {
+        const sess = sessByContentId.get(r.sessionId);
+        const card = el("div", "card card-rec");
+        card.dataset.id = r.id;
+        if (r.id === state.selectedRecId) card.classList.add("sel");
 
-    if (!svgSel) {
-      svgSel = d3.select("#graph");
-      rootG = svgSel.append("g");
-    }
-    // Reset any prior zoom transform left by the force-graph view, and clear handlers.
-    rootG.attr("transform", null);
-    svgSel.on(".zoom", null);
-    svgSel.attr("viewBox", `0 0 ${W} ${H}`);
-    rootG.selectAll("*").remove();
+        const head = el("div", "card-head");
+        head.appendChild(el("span", "badge " + r.type, r.type));
+        if (sess && sess.label)
+          head.appendChild(el("span", "cchip", sess.label));
+        card.appendChild(head);
 
-    // Parse dates; drop sessions with no usable timestamp
-    const data = sessions
-      .map((s) =>
-        Object.assign({}, s, { _date: s.started ? new Date(s.started) : null }),
-      )
-      .filter((s) => s._date && !isNaN(s._date));
-    $("#graph-empty").style.display = data.length ? "none" : "flex";
-    if (!data.length) return;
+        card.appendChild(el("h3", "card-title", r.title || "(untitled)"));
+        const snip = r.subtitle || (r.text || "").slice(0, 200);
+        if (snip) card.appendChild(el("div", "card-summary", snip));
 
-    const LEFT = 110,
-      TOP = 28,
-      RIGHT = 24,
-      BOTTOM = 14;
-    const innerW = Math.max(40, W - LEFT - RIGHT);
-    const innerH = Math.max(40, H - TOP - BOTTOM);
+        const meta = el("div", "card-meta");
+        meta.appendChild(el("span", "card-chip", r.project));
+        if (r.date)
+          meta.appendChild(el("span", "card-chip", r.date.slice(0, 10)));
+        if (r.files && r.files.length)
+          meta.appendChild(
+            el(
+              "span",
+              "card-chip",
+              r.files.length + " file" + (r.files.length === 1 ? "" : "s"),
+            ),
+          );
+        card.appendChild(meta);
 
-    // Project lanes, sorted by total activity desc
-    const activity = new Map();
-    data.forEach((s) => {
-      const p = s.project || "(none)";
-      activity.set(p, (activity.get(p) || 0) + (s.obsCount || 1));
-    });
-    const projects = [...activity.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .map(([p]) => p);
+        if (sess) {
+          const from = el("div", "card-from");
+          from.appendChild(document.createTextNode("from session: "));
+          const link = el(
+            "a",
+            null,
+            sess.label || truncate(sess.title || "(untitled)", 40),
+          );
+          link.href = "#";
+          link.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            selectSession(sess.id);
+          });
+          from.appendChild(link);
+          card.appendChild(from);
+        }
 
-    const xExt = d3.extent(data, (s) => s._date);
-    const xMin = d3.timeWeek.offset(d3.timeMonth.floor(xExt[0]), -1);
-    const xMax = d3.timeDay.offset(xExt[1], 2);
-    const xScale = d3
-      .scaleTime()
-      .domain([xMin, xMax])
-      .range([LEFT, LEFT + innerW]);
-    const yScale = d3
-      .scaleBand()
-      .domain(projects)
-      .range([TOP, TOP + innerH])
-      .padding(0.25);
-
-    const sizeOf = (s) =>
-      Math.min(
-        14,
-        4 + Math.sqrt((s.hitCount != null ? s.hitCount * 3 : s.obsCount) || 1),
-      );
-    // deterministic vertical jitter from session id so a node stays in place across renders
-    const jitter = (sid) => {
-      let h = 0;
-      for (const c of sid || "") h = ((h << 5) - h + c.charCodeAt(0)) | 0;
-      return (((h >>> 0) % 1000) / 1000 - 0.5) * yScale.bandwidth() * 0.55;
-    };
-
-    // lane backgrounds + separators
-    rootG
-      .append("g")
-      .selectAll("rect")
-      .data(projects)
-      .enter()
-      .append("rect")
-      .attr("class", "t-lane")
-      .attr("x", LEFT)
-      .attr("y", (p) => yScale(p))
-      .attr("width", innerW)
-      .attr("height", yScale.bandwidth());
-
-    // lane labels (project names) on the left
-    rootG
-      .append("g")
-      .selectAll("text")
-      .data(projects)
-      .enter()
-      .append("text")
-      .attr("class", "t-lane-label")
-      .attr("x", LEFT - 10)
-      .attr("y", (p) => yScale(p) + yScale.bandwidth() / 2)
-      .attr("text-anchor", "end")
-      .attr("dominant-baseline", "central")
-      .text((p) => truncate(p.replace(/^zatlas-/, ""), 16));
-
-    // top time axis
-    const xAxisFn = (scale) =>
-      d3
-        .axisTop(scale)
-        .ticks(d3.timeMonth.every(1))
-        .tickFormat(d3.timeFormat("%b %y"));
-    const axisG = rootG
-      .append("g")
-      .attr("class", "t-axis")
-      .attr("transform", `translate(0, ${TOP})`)
-      .call(xAxisFn(xScale));
-    axisG
-      .selectAll(".tick line")
-      .attr("y2", innerH)
-      .attr("stroke", "var(--border2)")
-      .attr("stroke-opacity", 0.18);
-    axisG.select(".domain").remove();
-
-    // sessions
-    const node = rootG
-      .append("g")
-      .selectAll("g")
-      .data(data, (d) => d.id)
-      .enter()
-      .append("g")
-      .attr("class", "gnode")
-      .attr("data-id", (d) => d.id);
-    node
-      .append("circle")
-      .attr("class", "t-dot")
-      .attr(
-        "cy",
-        (d) => yScale(d.project) + yScale.bandwidth() / 2 + jitter(d.id),
-      )
-      .attr("r", sizeOf)
-      .attr("fill", SESSION_COLOR)
-      .attr("stroke", SESSION_COLOR)
-      .attr("stroke-opacity", 0.5)
-      .style(
-        "filter",
-        (d) =>
-          `drop-shadow(0 0 ${Math.max(2, sizeOf(d) * 0.5)}px ${SESSION_COLOR}55)`,
-      );
-    node
-      .append("text")
-      .attr("class", "t-label")
-      .attr(
-        "y",
-        (d) => yScale(d.project) + yScale.bandwidth() / 2 + jitter(d.id),
-      )
-      .attr("dy", "0.32em")
-      .text((d) => d.label || truncate(d.title || "session", 16));
-    node.append("title").text((d) => d.title || "");
-    // Native title attribute is the cheapest tooltip; renders on hover in every browser.
-
-    const placeX = (scale) => {
-      node.select("circle").attr("cx", (d) => scale(d._date));
-      node.select("text").attr("x", (d) => scale(d._date) + sizeOf(d) + 4);
-    };
-    placeX(xScale);
-
-    node
-      .style("cursor", "pointer")
-      .on("click", (e, d) => selectSession(d.id))
-      .on("mouseenter", function (e, d) {
-        d3.select(this).raise();
-        rootG
-          .selectAll(".gnode")
-          .classed("dim", (n) => n.project !== d.project);
-      })
-      .on("mouseleave", () => rootG.selectAll(".gnode").classed("dim", false));
-
-    // pan / zoom on the time axis
-    tZoom = d3
-      .zoom()
-      .scaleExtent([0.5, 24])
-      .translateExtent([
-        [0, 0],
-        [W, H],
-      ])
-      .extent([
-        [LEFT, TOP],
-        [LEFT + innerW, TOP + innerH],
-      ])
-      .on("zoom", (ev) => {
-        const nx = ev.transform.rescaleX(xScale);
-        axisG.call(xAxisFn(nx));
-        axisG
-          .selectAll(".tick line")
-          .attr("y2", innerH)
-          .attr("stroke", "var(--border2)")
-          .attr("stroke-opacity", 0.18);
-        axisG.select(".domain").remove();
-        placeX(nx);
+        card.addEventListener("click", () => selectRecord(r.id));
+        frag.appendChild(card);
       });
-    svgSel.call(tZoom);
-    svgSel.transition().duration(0).call(tZoom.transform, d3.zoomIdentity);
+      list.appendChild(frag);
+    } else {
+      // Session cards (default overview)
+      const pool = sessionCardsData();
+      $("#results-count").textContent = pool.length;
+      $("#pane-title-label").textContent = "Sessions";
+      if (!pool.length) {
+        list.appendChild(
+          el("div", "empty", "No sessions in this project yet."),
+        );
+        return;
+      }
+      const frag = document.createDocumentFragment();
+      pool.forEach((s) => {
+        const card = el("div", "card card-sess");
+        card.dataset.id = s.id;
+
+        card.appendChild(
+          el(
+            "h3",
+            "card-title card-title-teal",
+            s.label || truncate(s.title || "session", 30),
+          ),
+        );
+
+        const meta = el("div", "card-meta");
+        meta.appendChild(
+          el("span", "card-chip card-chip-strong", s.project || ""),
+        );
+        if (s.obsCount != null)
+          meta.appendChild(el("span", "card-chip", s.obsCount + " obs"));
+        if (s.started)
+          meta.appendChild(el("span", "card-chip", relativeAgo(s.started)));
+        card.appendChild(meta);
+
+        if (s.summary) {
+          card.appendChild(
+            el("div", "card-summary card-summary-italic", s.summary),
+          );
+        } else if (s.title) {
+          card.appendChild(el("div", "card-summary", truncate(s.title, 200)));
+        }
+
+        const actions = el("div", "card-actions");
+        const resume = el("button", "btn", "Copy resume");
+        resume.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          copyText("claude --resume " + s.id);
+          resume.textContent = "Copied!";
+          setTimeout(() => (resume.textContent = "Copy resume"), 1200);
+        });
+        actions.appendChild(resume);
+        card.appendChild(actions);
+
+        card.addEventListener("click", () => selectSession(s.id));
+        frag.appendChild(card);
+      });
+      list.appendChild(frag);
+    }
   }
 
   // Drill-down: one session expanded into its observations + the files they share.
@@ -739,12 +701,19 @@
   // (a query active), or the default session map.
   function renderGraphView() {
     const resetBtn = $("#reset-graph");
+    const body = document.body;
     if (state.selectedSessId) {
+      // drill-down: force-graph + records list (the existing three-pane layout)
+      body.classList.remove("view-cards");
+      body.classList.toggle("searching", !!state.query);
       if (resetBtn) resetBtn.textContent = "← all sessions";
       return renderForce(buildSubgraph(currentRecs), { labelAll: true });
     }
+    // overview: cards (graph pane hidden via .view-cards on body)
+    body.classList.add("view-cards");
+    body.classList.toggle("searching", !!state.query);
     if (resetBtn) resetBtn.textContent = "Reset view";
-    renderTimeline(timelineSessions());
+    renderCards();
   }
 
   // Remembered between renderForce() and setActive() so the active-node highlight

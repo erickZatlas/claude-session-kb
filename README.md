@@ -1,7 +1,7 @@
 # Claude Knowledge Base
 
 A small local web app that makes the knowledge in your [claude-mem](https://github.com/thedotmack/claude-mem)
-store browsable and searchable — a **timeline of your sessions** across projects, plus
+store browsable and searchable — a **search-first overview of your sessions as cards**, plus
 **keyword and semantic search** over every observation and summary claude-mem has captured.
 A FastAPI backend reads `~/.claude-mem` live (read-only) and stays current as you work.
 
@@ -9,7 +9,7 @@ A FastAPI backend reads `~/.claude-mem` live (read-only) and stays current as yo
 
 - **Explainer + complete guide** (`/`) — the per-task session workflow (`ctask` / `cont` /
   `cresume` / `cfind`) and how to use every feature of the KB.
-- **Knowledge base** (`/kb.html`) — timeline + search + drill-down.
+- **Knowledge base** (`/kb.html`) — session cards + search + drill-down force graph.
 
 ## Run it
 
@@ -27,18 +27,23 @@ to `.cache/`, so subsequent starts are fast and only new records get embedded.
 
 ## What it looks like
 
-### Timeline overview — your sessions across projects, over time
+### Overview — session cards, sortable by recent or activity
 
-![Timeline overview](docs/images/timeline.png)
+![Overview](docs/images/overview.png)
 
-Each project gets a horizontal swimlane. Sessions are teal circles at their start time,
-sized by activity, labelled with a kebab-case topic (`stuck-charges`, `opera-cloud`,
-`zif-overcharge-bug`). Wheel-zoom and drag-pan the time axis. Hover a session to dim other
-lanes; click to drill in.
+Each card is a session: kebab-case topic title (`stuck-charges`, `opera-cloud`,
+`bem-1password`), project + observation count + relative time, an LLM-written 1–2 sentence
+summary, and a one-click **Copy resume** button. Sort by *recent* or *activity* via the
+chip in the toolbar. Click a card to drill into the session.
 
-When you type a query, the timeline narrows to just the sessions that contain hits, sized
-by hit count. Semantic mode (the chip beside the search box) ranks the same set by meaning
-instead of literal keyword.
+### Search — record cards, ranked by relevance (keyword or semantic)
+
+![Search](docs/images/search.png)
+
+When you type a query the overview swaps to ranked **record cards** — each hit is a
+distinct observation or summary, with a type badge, snippet, project/date/files, and a
+`from session: <kebab>` link that drills into the source session. Toggle *semantic* in
+the toolbar to rank by meaning (server-side embedding) instead of literal keyword.
 
 ### Drill-down — one session expanded into its observations
 
@@ -57,8 +62,9 @@ amber = change). Each one carries a single-word label picked from its own title.
 - **SSE for freshness only.** Search is plain request/response; `/api/stream` pushes a
   `refresh` event when claude-mem gains new entries, and the page re-runs the current view
   automatically.
-- **Two views, one app.** Timeline = chronology across projects (overview). Force graph =
-  one session expanded (drill-down). They share search/filter state and live freshness.
+- **Two views, one app.** Cards (overview) = readable text where text belongs.
+  Force graph (drill-down) = one session's observations expanded around its anchor. They
+  share search / filter state and live freshness.
 
 ## API
 
@@ -80,7 +86,7 @@ amber = change). Each one carries a single-word label picked from its own title.
 | `embeddings.py` | `all-MiniLM-L6-v2` embeddings, cosine search, incremental disk cache |
 | `llm.py` | Optional DeepSeek client for kebab labels + 1–2 sentence session summaries |
 | `static/index.html` | Explainer + complete user guide (13 sections, D3 diagrams) |
-| `static/kb.html` + `static/kb.js` | The KB UI — D3 timeline + force graph + EventSource client |
+| `static/kb.html` + `static/kb.js` | The KB UI — card overview + D3 force-graph drill-down + EventSource client |
 | `static/theme.css` | Shared dark "observatory" theme (Inter + JetBrains Mono) |
 | `shell/claude.sh` | Per-task session helpers — see below |
 | `.cache/` | Generated embedding cache + LLM cache (git-ignored) |
