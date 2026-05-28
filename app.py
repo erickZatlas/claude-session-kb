@@ -27,7 +27,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from embeddings import Embedder
@@ -177,15 +177,39 @@ class NoCacheStaticFiles(StaticFiles):
         return resp
 
 
-@app.get("/")
-def root():
-    return FileResponse(
-        os.path.join(STATIC, "index.html"),
+def _bust(html: str) -> str:
+    """Append ?v=<mtime> to local asset URLs so the browser can't refuse to refetch."""
+    def ver(name: str) -> str:
+        try:
+            return str(int(os.path.getmtime(os.path.join(STATIC, name))))
+        except OSError:
+            return "0"
+    return (
+        html.replace('src="kb.js"', f'src="kb.js?v={ver("kb.js")}"')
+            .replace('href="theme.css"', f'href="theme.css?v={ver("theme.css")}"')
+    )
+
+
+def _serve_html(name: str) -> HTMLResponse:
+    body = open(os.path.join(STATIC, name), encoding="utf-8").read()
+    return HTMLResponse(
+        content=_bust(body),
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
 
-# Serve the rest of the frontend (kb.html, kb.js, theme.css). Mounted last so /api/* wins.
+@app.get("/")
+def root():
+    return _serve_html("index.html")
+
+
+@app.get("/kb.html")
+def kb_html():
+    return _serve_html("kb.html")
+
+
+# Serve the rest of the frontend (kb.js, theme.css, etc). Mounted last so /api/* + the
+# explicit HTML routes above win. The class also sends no-cache headers on every asset.
 app.mount("/", NoCacheStaticFiles(directory=STATIC, html=True), name="static")
 
 
