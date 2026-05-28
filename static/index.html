@@ -158,22 +158,22 @@
 <div class="diagram">
   <div class="diagram-title">From volatile transcript to durable, searchable knowledge</div>
   <svg id="d-mem" viewBox="0 0 620 300"></svg>
-  <div class="diagram-caption">The live transcript fades (90 days); claude-mem keeps a searchable, structured record; this knowledge base reads from it.</div>
+  <div class="diagram-caption">The live transcript fades (90 days); this KB captures every session, generates topical observations, and surfaces relevant past work back into Claude's context automatically.</div>
 </div>
 <ul>
   <li><strong>Live transcript</strong> &mdash; the full JSONL of a session. Reachable with <code>cont</code>, <code>cresume</code>, <code>cfind</code>. Expires after 90 days.</li>
-  <li><strong>claude-mem</strong> &mdash; observations &amp; session summaries captured into a searchable SQLite store (<code>~/.claude-mem/</code>). Reached with <code>mem-search</code>. Persistent.</li>
+  <li><strong>claude-session-kb</strong> &mdash; <em>this</em> system. Every prompt is captured to <code>~/.claude-kb/data.db</code> via hooks. When each session ends, DeepSeek extracts 3&ndash;7 topical observations with domain-specific tags. Pre-emptive recall injects matching past sessions into every new prompt's context. Persistent. Self-contained.</li>
   <li><strong>Auto-memory</strong> &mdash; the curated <code>MEMORY.md</code> notes, loaded into every session automatically.</li>
 </ul>
 
 <!-- 05 -->
 <h2 id="kb"><span class="section-num">SECTION 05</span>Your knowledge base &mdash; what it is</h2>
-<p>The bottom layer &mdash; claude-mem &mdash; holds thousands of observations and session summaries from your past work. The knowledge base makes that searchable and navigable: a graph of how sessions, observations, files and concepts connect, plus full-text and semantic search across everything.</p>
+<p>This page is the human window into a system that's mostly invisible. Four hooks wired into Claude Code's lifecycle write every session to <code>~/.claude-kb/data.db</code>, generate topical observations via DeepSeek when each session ends, and inject relevant past work into the context of every new prompt you send. The KB you're about to open is the manual interface: a graph of how sessions, observations and topical tags connect, plus full-text and semantic search across everything.</p>
 <a class="cta" href="kb.html">Open your knowledge base &rarr;</a>
 <div class="callout info">
   <span class="callout-icon">&#8505;</span>
   <div class="callout-body"><strong>Local &amp; live</strong>
-  <p>A small FastAPI backend (<code>python app.py</code>) reads <code>~/.claude-mem</code> read-only and stays current as you work &mdash; search runs server-side, and an SSE channel refreshes the page when new entries land. Nothing is written back, nothing leaves your machine (except optional, opt-in LLM clarification &mdash; section 11).</p></div>
+  <p>A small FastAPI backend (<code>python app.py</code>) owns <code>~/.claude-kb/data.db</code>. The capture hooks write to it as you work; the recall hook reads from it and injects context before each prompt. Claude can also query it directly via two MCP tools (<code>search_my_sessions</code>, <code>get_session</code>). Nothing leaves your machine except optional DeepSeek calls for observation generation and labels &mdash; section 11.</p></div>
 </div>
 <p>The rest of this page is the full guide: how the KB is organised, how to search and filter, how to read the graph, and the workflows it's actually good for.</p>
 
@@ -224,7 +224,7 @@
 <thead><tr><th>Control</th><th>What it does</th></tr></thead>
 <tbody>
   <tr><td>project dropdown</td><td>Limits the cards and the search results to one project (e.g. <code>zatlas-pms-middleware</code>). Default: all projects.</td></tr>
-  <tr><td>kind chips: all / observations / summaries</td><td>In search mode, restricts the result records by type. Observations are claude-mem's atomic findings; summaries are session-level rollups (request / investigated / learned / completed / next steps).</td></tr>
+  <tr><td>kind chips: all / observations / summaries</td><td>In search mode, restricts the result records by type. Observations are atomic findings extracted from each session; summaries are session-level rollups stored on the session itself (one per session, written when the Stop hook fires).</td></tr>
   <tr><td>mode chips: keyword / semantic</td><td>Switches search backend &mdash; covered in section 07.</td></tr>
   <tr><td>sort chips: recent / activity</td><td>Re-orders session cards in the overview. Hidden during search (the API's ranking is the order). Hidden in drill-down (records keep their own order). Default: <em>recent</em>.</td></tr>
 </tbody>
@@ -309,34 +309,40 @@
 <!-- 11 -->
 <h2 id="freshness"><span class="section-num">SECTION 11</span>Live freshness &amp; LLM clarification</h2>
 <h3>Live freshness (always on)</h3>
-<p>The browser keeps an <code>EventSource</code> open to <code>/api/stream</code>. Every few seconds the server checks if claude-mem grew (new observations from your active Claude Code sessions). When it does, the server reloads in place and pushes a <code>refresh</code> event &mdash; the page silently re-runs the current view and you see <em>"↻ updated with new entries"</em> flash in the status bar.</p>
+<p>The browser keeps an <code>EventSource</code> open to <code>/api/stream</code>. Every few seconds the server checks if <code>~/.claude-kb/data.db</code> grew (new prompts captured, new observations generated). When it does, the server reloads in place and pushes a <code>refresh</code> event &mdash; the page silently re-runs the current view and you see <em>"↻ updated with new entries"</em> flash in the status bar.</p>
 <p>You never restart the server, never reload the page. The KB stays in sync with whatever Claude Code is doing.</p>
-<h3 class="amber">LLM clarification (optional, opt-in)</h3>
-<p>If <code>DEEPSEEK_API_KEY</code> is set in the environment, a background pass asks DeepSeek for:</p>
+<h3 class="amber">LLM observations &amp; labels (optional, opt-in)</h3>
+<p>If <code>DEEPSEEK_API_KEY</code> is set in the environment, the Stop hook on each completed session asks DeepSeek for:</p>
 <ul>
-  <li><strong>A kebab-case topic label per session</strong> &mdash; 1&ndash;3 lowercase words joined by hyphens (<code>stuck-charges</code>, <code>opera-cloud</code>, <code>ihg-awaiting-checkin</code>), replacing the TF-IDF heuristic. Corrects typos, prefers real English/domain words.</li>
+  <li><strong>3 to 7 topical observations</strong> per session &mdash; each with a type (<code>discovery</code>, <code>change</code>, <code>bugfix</code>, <code>decision</code>, <code>refactor</code>, <code>feature</code>), a one-line title, 1&ndash;2 sentences of detail, and 2&ndash;5 <strong>domain-specific tags</strong> (acronyms, identifiers, file names, kebab concepts). The system prompt explicitly bans generic tokens like <code>how-it-works</code> / <code>what-changed</code>; a client-side filter drops anything that sneaks through.</li>
+  <li><strong>A kebab-case topic label per session</strong> &mdash; 1&ndash;3 lowercase words joined by hyphens (<code>stuck-charges</code>, <code>oxi-outage-probe</code>, <code>bem-stripe-cdp-fix</code>), shown on every card.</li>
   <li><strong>A 1&ndash;2 sentence summary per session</strong> &mdash; shown directly on every session card and in the detail panel.</li>
 </ul>
-<p>Cost is pennies on the first run; everything caches to <code>.cache/llm.json</code> keyed by content hash + prompt. New sessions get enriched incrementally. The toolbar shows <code>clarifying labels…</code> while it runs.</p>
+<p>Cost is pennies on the first run; everything caches to <code>.cache/llm.json</code> keyed by <code>sha256(model + kind + system_prompt + payload)</code> &mdash; tweaking the system prompt invalidates only its own entries. New sessions get enriched incrementally as their Stop hook fires.</p>
 <div class="callout warn">
   <span class="callout-icon">&#128274;</span>
   <div class="callout-body"><strong>Privacy</strong>
-  <p>Enabling LLM clarification sends session content (your prompts + observation titles) to DeepSeek's API under their TOS. claude-mem can contain confidential project data. To disable: <code>unset DEEPSEEK_API_KEY</code> &mdash; the tool falls back to TF-IDF labels and skips summaries with no errors.</p></div>
+  <p>Enabling DeepSeek sends session content (your prompts + observation titles) to their API under their TOS. Sessions can contain confidential project data. To disable: <code>unset DEEPSEEK_API_KEY</code> &mdash; capture + recall keep working; observation generation falls back to a regex-based topical tag extractor, and labels fall back to a TF-IDF heuristic.</p></div>
 </div>
 
 <!-- 12 -->
 <h2 id="arch"><span class="section-num">SECTION 12</span>Under the hood</h2>
-<p>The whole thing is one Python process and one HTML page.</p>
+<p>One Python process, one HTML page, four hooks, two MCP tools.</p>
 <div class="diagram">
   <div class="diagram-title">data flow</div>
   <svg id="d-arch" viewBox="0 0 620 280"></svg>
-  <div class="diagram-caption">Hover any box to highlight what it touches. claude-mem is read-only; nothing is ever written back.</div>
+  <div class="diagram-caption">Capture hooks write to <code>~/.claude-kb/data.db</code>; the recall hook reads from the embedded index and injects context; the Stop hook triggers observation generation. The web UI and MCP tools are both views over the same store.</div>
 </div>
 <ul>
-  <li><strong><code>store.py</code></strong> &mdash; loads claude-mem records into memory; rebuilds when the DB grows; computes TF-IDF labels; serves keyword search.</li>
-  <li><strong><code>embeddings.py</code></strong> &mdash; embeds records with <code>all-MiniLM-L6-v2</code>; persistent cache in <code>.cache/vectors.npy</code>; runs cosine search server-side.</li>
-  <li><strong><code>llm.py</code></strong> &mdash; optional DeepSeek client for label + summary clarification; lazy; cached to <code>.cache/llm.json</code>.</li>
-  <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + the SSE channel; serves the static frontend with no-cache headers and a version-busted script URL.</li>
+  <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + SSE channel + capture/observe endpoints + recall endpoint + Phase D import endpoints. Serves the static frontend with no-cache headers and version-busted asset URLs.</li>
+  <li><strong><code>store.py</code></strong> &mdash; in-memory view of <code>~/.claude-kb/data.db</code>: sessions, observations, projects. Reloads when the DB grows.</li>
+  <li><strong><code>store_capture.py</code></strong> &mdash; the capture store: sessions / prompts / observations tables with lightweight migrations; thread-safe writers.</li>
+  <li><strong><code>observe.py</code></strong> &mdash; DeepSeek observation generator with the topical-tag system prompt; client-side regex tag extractor for bulk imports.</li>
+  <li><strong><code>embeddings.py</code></strong> &mdash; embeds observations with <code>all-MiniLM-L6-v2</code>; persistent cache in <code>.cache/vectors.npy</code>; runs cosine search server-side.</li>
+  <li><strong><code>llm.py</code></strong> &mdash; DeepSeek client for kebab labels + summaries; lazy; hash-keyed cache in <code>.cache/llm.json</code>.</li>
+  <li><strong><code>mcp_server.py</code></strong> &mdash; stdio MCP server exposing <code>search_my_sessions</code> + <code>get_session</code> as one-call tools for Claude.</li>
+  <li><strong><code>hooks/recall.py</code></strong> &mdash; UserPromptSubmit hook: hits <code>/api/recall</code>, formats the result as <code>additionalContext</code>.</li>
+  <li><strong><code>hooks/capture.py</code></strong> &mdash; SessionStart / UserPromptSubmit / Stop hook: writes lifecycle + prompts, triggers observation generation on completion.</li>
   <li><strong><code>static/kb.js</code></strong> &mdash; in-browser logic: card rendering (session + record), D3 force-graph drill-down, search debouncing, EventSource handling, detail panel.</li>
 </ul>
 <h3>API surface</h3>
@@ -348,7 +354,11 @@
   <tr><td>GET /api/search</td><td>ranked records (keyword | semantic, with project/kind/session filters)</td></tr>
   <tr><td>GET /api/record/{id}</td><td>one record + its session</td></tr>
   <tr><td>GET /api/sessions</td><td>all sessions (with labels + summaries when enriched)</td></tr>
-  <tr><td>GET /api/graph</td><td>session-overview nodes + shared-file links (kept for a potential future map toggle; currently unused by the frontend)</td></tr>
+  <tr><td>GET /api/recall</td><td>semantic recall over your history; same backend the UserPromptSubmit hook uses</td></tr>
+  <tr><td>GET /api/graph</td><td>session-overview nodes + shared-tag links</td></tr>
+  <tr><td>GET /api/observe/{sid}</td><td>read one session's observations + label + summary</td></tr>
+  <tr><td>POST /api/observe/{sid}</td><td>(re-)generate observations (background by default; <code>?sync=true</code> blocks)</td></tr>
+  <tr><td>POST /api/capture/{start,prompt,end}</td><td>hooks talk to these</td></tr>
   <tr><td>GET /api/stream</td><td>SSE: <code>refresh</code> on data growth, <code>ping</code> with indexing/enrichment progress</td></tr>
 </tbody>
 </table>
@@ -480,16 +490,16 @@
     nodes:[
       { id:'sessrun', x:120, y:46,  w:170, h:44, style:'surface', mono:true, label:'session running' },
       { id:'trans',   x:120, y:150, w:185, h:54, style:'db', mono:true, fs:10, label:'live transcript\nJSONL · 90-day' },
-      { id:'mem',     x:370, y:150, w:200, h:60, style:'green', mono:true, fs:10, label:'claude-mem\nobservations + summaries\nFTS-searchable' },
+      { id:'mem',     x:370, y:150, w:200, h:60, style:'green', mono:true, fs:10, label:'claude-session-kb\n~/.claude-kb/data.db\nsessions + obs + tags' },
       { id:'auto',    x:370, y:46,  w:200, h:46, style:'purple', mono:true, fs:10, label:'auto-memory\nMEMORY.md · curated' },
       { id:'kb',      x:370, y:255, w:200, h:44, style:'primary', mono:true, label:'this knowledge base' },
       { id:'recall',  x:120, y:255, w:185, h:44, style:'blue', mono:true, fs:10, label:'cont · cresume · cfind' },
     ],
     edges:[
       { from:'sessrun', to:'trans', label:'writes', lx:-22 },
-      { from:'sessrun', to:'mem', green:true, label:'captures', ly:-2 },
+      { from:'sessrun', to:'mem', green:true, label:'hooks capture', ly:-2 },
       { from:'trans', to:'recall', dashed:true, label:'reach', lx:-20 },
-      { from:'mem', to:'kb', green:true, label:'reads', lx:18 },
+      { from:'mem', to:'kb', green:true, label:'view', lx:18 },
       { from:'mem', to:'auto', dashed:true, label:'distills', lx:20 },
     ],
   });
@@ -497,7 +507,7 @@
   // Diagram — architecture / data flow (section 12)
   render('d-arch', {
     nodes:[
-      { id:'mem',   x:90,  y:140, w:150, h:64, style:'db',      mono:true, fs:10, label:'claude-mem\nSQLite + chroma\n(read-only)' },
+      { id:'mem',   x:90,  y:140, w:150, h:64, style:'db',      mono:true, fs:10, label:'~/.claude-kb/\ndata.db\n(our store)' },
       { id:'store', x:310, y:60,  w:140, h:42, style:'surface', mono:true, label:'store.py' },
       { id:'embed', x:310, y:140, w:140, h:42, style:'blue',    mono:true, label:'embeddings.py' },
       { id:'llm',   x:310, y:220, w:160, h:42, style:'purple',  mono:true, fs:10, label:'llm.py (optional)' },
