@@ -136,6 +136,10 @@ def api_record(rec_id: str):
 
 @app.get("/api/graph")
 def api_graph(project: str = "all"):
+    """Session-overview topology (sessions + shared-file edges). The frontend's main
+    overview is now the timeline (uses /api/sessions instead), so this endpoint is
+    currently unused by kb.js — kept in place so a 'map' view can be reinstated as a
+    toggle with a one-line render switch."""
     _refresh_and_kick()
     return store.session_graph(project)
 

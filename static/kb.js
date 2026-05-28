@@ -442,68 +442,217 @@
     svgSel = null,
     rootG = null;
 
-  // ---- session-overview map (cached per project) ----
-  let graphCache = { project: null, data: null };
-  async function ensureGraph(project) {
-    if (graphCache.project === project && graphCache.data)
-      return graphCache.data;
-    const data = await api("/api/graph?project=" + encodeURIComponent(project));
-    graphCache = { project, data };
-    return data;
-  }
-  function invalidateGraphCache() {
-    graphCache = { project: null, data: null };
-  }
-
-  // Default overview: top sessions as nodes (sized by activity), linked by shared files.
-  function buildOverview(gd) {
-    const ids = new Set(gd.nodes.map((s) => s.id));
-    const nodes = gd.nodes.map((s) => ({
-      id: "S:" + s.id,
-      ref: s.id,
-      kind: "session",
-      label: s.label || truncate(s.title, 16),
-      color: SESSION_COLOR,
-      r: Math.min(18, 6 + Math.sqrt(s.obsCount || 1)),
-    }));
-    const links = gd.links
-      .filter((l) => ids.has(l.source) && ids.has(l.target))
-      .map((l) => ({
-        source: "S:" + l.source,
-        target: "S:" + l.target,
-        kind: "shared",
-        weight: l.weight,
-      }));
-    return { nodes, links };
+  // ---- overview: timeline with project swimlanes ----
+  // Pick which sessions to render: project-filtered, narrowed to hit-sessions when a
+  // query is active (sized by hit count instead of obsCount in that case).
+  function timelineSessions() {
+    let pool = [...sessByContentId.values()];
+    if (state.project !== "all")
+      pool = pool.filter((s) => s.project === state.project);
+    if (state.query) {
+      const hits = new Map();
+      currentRecs.forEach((r) => {
+        if (r.sessionId)
+          hits.set(r.sessionId, (hits.get(r.sessionId) || 0) + 1);
+      });
+      pool = pool
+        .filter((s) => hits.has(s.id))
+        .map((s) => Object.assign({}, s, { hitCount: hits.get(s.id) }));
+    }
+    return pool;
   }
 
-  // Search overview: just the sessions that own the current hits, sized by hit count.
-  function buildSearchOverview() {
-    const hits = new Map();
-    currentRecs.forEach((r) => {
-      if (r.sessionId) hits.set(r.sessionId, (hits.get(r.sessionId) || 0) + 1);
+  let tZoom = null;
+  function renderTimeline(sessions) {
+    const wrap = $("#graph-wrap");
+    const W = wrap.clientWidth || 1000,
+      H = wrap.clientHeight || 500;
+
+    if (!svgSel) {
+      svgSel = d3.select("#graph");
+      rootG = svgSel.append("g");
+    }
+    // Reset any prior zoom transform left by the force-graph view, and clear handlers.
+    rootG.attr("transform", null);
+    svgSel.on(".zoom", null);
+    svgSel.attr("viewBox", `0 0 ${W} ${H}`);
+    rootG.selectAll("*").remove();
+
+    // Parse dates; drop sessions with no usable timestamp
+    const data = sessions
+      .map((s) =>
+        Object.assign({}, s, { _date: s.started ? new Date(s.started) : null }),
+      )
+      .filter((s) => s._date && !isNaN(s._date));
+    $("#graph-empty").style.display = data.length ? "none" : "flex";
+    if (!data.length) return;
+
+    const LEFT = 110,
+      TOP = 28,
+      RIGHT = 24,
+      BOTTOM = 14;
+    const innerW = Math.max(40, W - LEFT - RIGHT);
+    const innerH = Math.max(40, H - TOP - BOTTOM);
+
+    // Project lanes, sorted by total activity desc
+    const activity = new Map();
+    data.forEach((s) => {
+      const p = s.project || "(none)";
+      activity.set(p, (activity.get(p) || 0) + (s.obsCount || 1));
     });
-    const ids = new Set(hits.keys());
-    const nodes = [...hits.entries()].map(([sid, c]) => {
-      const s = sessByContentId.get(sid);
-      return {
-        id: "S:" + sid,
-        ref: sid,
-        kind: "session",
-        label: (s && s.label) || truncate(s ? s.title : "session", 16),
-        color: SESSION_COLOR,
-        r: Math.min(18, 6 + Math.sqrt(c * 3)),
-      };
-    });
-    const links = (graphCache.data ? graphCache.data.links : [])
-      .filter((l) => ids.has(l.source) && ids.has(l.target))
-      .map((l) => ({
-        source: "S:" + l.source,
-        target: "S:" + l.target,
-        kind: "shared",
-        weight: l.weight,
-      }));
-    return { nodes, links };
+    const projects = [...activity.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([p]) => p);
+
+    const xExt = d3.extent(data, (s) => s._date);
+    const xMin = d3.timeWeek.offset(d3.timeMonth.floor(xExt[0]), -1);
+    const xMax = d3.timeDay.offset(xExt[1], 2);
+    const xScale = d3
+      .scaleTime()
+      .domain([xMin, xMax])
+      .range([LEFT, LEFT + innerW]);
+    const yScale = d3
+      .scaleBand()
+      .domain(projects)
+      .range([TOP, TOP + innerH])
+      .padding(0.25);
+
+    const sizeOf = (s) =>
+      Math.min(
+        14,
+        4 + Math.sqrt((s.hitCount != null ? s.hitCount * 3 : s.obsCount) || 1),
+      );
+    // deterministic vertical jitter from session id so a node stays in place across renders
+    const jitter = (sid) => {
+      let h = 0;
+      for (const c of sid || "") h = ((h << 5) - h + c.charCodeAt(0)) | 0;
+      return (((h >>> 0) % 1000) / 1000 - 0.5) * yScale.bandwidth() * 0.55;
+    };
+
+    // lane backgrounds + separators
+    rootG
+      .append("g")
+      .selectAll("rect")
+      .data(projects)
+      .enter()
+      .append("rect")
+      .attr("class", "t-lane")
+      .attr("x", LEFT)
+      .attr("y", (p) => yScale(p))
+      .attr("width", innerW)
+      .attr("height", yScale.bandwidth());
+
+    // lane labels (project names) on the left
+    rootG
+      .append("g")
+      .selectAll("text")
+      .data(projects)
+      .enter()
+      .append("text")
+      .attr("class", "t-lane-label")
+      .attr("x", LEFT - 10)
+      .attr("y", (p) => yScale(p) + yScale.bandwidth() / 2)
+      .attr("text-anchor", "end")
+      .attr("dominant-baseline", "central")
+      .text((p) => truncate(p.replace(/^zatlas-/, ""), 16));
+
+    // top time axis
+    const xAxisFn = (scale) =>
+      d3
+        .axisTop(scale)
+        .ticks(d3.timeMonth.every(1))
+        .tickFormat(d3.timeFormat("%b %y"));
+    const axisG = rootG
+      .append("g")
+      .attr("class", "t-axis")
+      .attr("transform", `translate(0, ${TOP})`)
+      .call(xAxisFn(xScale));
+    axisG
+      .selectAll(".tick line")
+      .attr("y2", innerH)
+      .attr("stroke", "var(--border2)")
+      .attr("stroke-opacity", 0.18);
+    axisG.select(".domain").remove();
+
+    // sessions
+    const node = rootG
+      .append("g")
+      .selectAll("g")
+      .data(data, (d) => d.id)
+      .enter()
+      .append("g")
+      .attr("class", "gnode")
+      .attr("data-id", (d) => d.id);
+    node
+      .append("circle")
+      .attr("class", "t-dot")
+      .attr(
+        "cy",
+        (d) => yScale(d.project) + yScale.bandwidth() / 2 + jitter(d.id),
+      )
+      .attr("r", sizeOf)
+      .attr("fill", SESSION_COLOR)
+      .attr("stroke", SESSION_COLOR)
+      .attr("stroke-opacity", 0.5)
+      .style(
+        "filter",
+        (d) =>
+          `drop-shadow(0 0 ${Math.max(2, sizeOf(d) * 0.5)}px ${SESSION_COLOR}55)`,
+      );
+    node
+      .append("text")
+      .attr("class", "t-label")
+      .attr(
+        "y",
+        (d) => yScale(d.project) + yScale.bandwidth() / 2 + jitter(d.id),
+      )
+      .attr("dy", "0.32em")
+      .text((d) => d.label || truncate(d.title || "session", 16));
+    node.append("title").text((d) => d.title || "");
+    // Native title attribute is the cheapest tooltip; renders on hover in every browser.
+
+    const placeX = (scale) => {
+      node.select("circle").attr("cx", (d) => scale(d._date));
+      node.select("text").attr("x", (d) => scale(d._date) + sizeOf(d) + 4);
+    };
+    placeX(xScale);
+
+    node
+      .style("cursor", "pointer")
+      .on("click", (e, d) => selectSession(d.id))
+      .on("mouseenter", function (e, d) {
+        d3.select(this).raise();
+        rootG
+          .selectAll(".gnode")
+          .classed("dim", (n) => n.project !== d.project);
+      })
+      .on("mouseleave", () => rootG.selectAll(".gnode").classed("dim", false));
+
+    // pan / zoom on the time axis
+    tZoom = d3
+      .zoom()
+      .scaleExtent([0.5, 24])
+      .translateExtent([
+        [0, 0],
+        [W, H],
+      ])
+      .extent([
+        [LEFT, TOP],
+        [LEFT + innerW, TOP + innerH],
+      ])
+      .on("zoom", (ev) => {
+        const nx = ev.transform.rescaleX(xScale);
+        axisG.call(xAxisFn(nx));
+        axisG
+          .selectAll(".tick line")
+          .attr("y2", innerH)
+          .attr("stroke", "var(--border2)")
+          .attr("stroke-opacity", 0.18);
+        axisG.select(".domain").remove();
+        placeX(nx);
+      });
+    svgSel.call(tZoom);
+    svgSel.transition().duration(0).call(tZoom.transform, d3.zoomIdentity);
   }
 
   // Drill-down: one session expanded into its observations + the files they share.
@@ -588,22 +737,14 @@
 
   // Decide which graph to show: drill-down (a session selected), search overview
   // (a query active), or the default session map.
-  async function renderGraphView() {
+  function renderGraphView() {
     const resetBtn = $("#reset-graph");
     if (state.selectedSessId) {
       if (resetBtn) resetBtn.textContent = "← all sessions";
       return renderForce(buildSubgraph(currentRecs), { labelAll: true });
     }
     if (resetBtn) resetBtn.textContent = "Reset view";
-    if (state.query)
-      return renderForce(buildSearchOverview(), { labelAll: true });
-    let gd;
-    try {
-      gd = await ensureGraph(state.project);
-    } catch (e) {
-      gd = { nodes: [], links: [] };
-    }
-    renderForce(buildOverview(gd), { labelAll: true });
+    renderTimeline(timelineSessions());
   }
 
   // Remembered between renderForce() and setActive() so the active-node highlight
@@ -841,8 +982,7 @@
       meta.projects = m.projects;
       setCounts();
       flashFresh();
-      invalidateGraphCache(); // session map may have changed
-      refreshSessions(); // labels/summaries may have been enriched server-side
+      refreshSessions(); // pulls fresh session dicts; timeline reads sessByContentId
       refresh(); // backend already reloaded; re-run current view
     });
     let lastSeenEnriched = -1;

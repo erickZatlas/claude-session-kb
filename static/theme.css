@@ -93,6 +93,16 @@ select.kb-select {
 .gnode.sel text { fill: #fff; }
 .glink { stroke: #2c3c66; stroke-opacity: .55; transition: opacity .15s; }
 .glink.dim { opacity: .07; }
+
+/* ---- Timeline overview (project swimlanes) ---- */
+.t-axis text { font-family: var(--mono); font-size: 10px; fill: var(--muted);
+  letter-spacing: .04em; text-transform: uppercase; }
+.t-axis path, .t-axis line { stroke: var(--border2); }
+.t-lane-label { font-family: var(--mono); font-size: 10px; fill: var(--muted);
+  letter-spacing: .02em; pointer-events: none; user-select: none; }
+.t-lane { fill: transparent; stroke: var(--border); stroke-opacity: .25;
+  stroke-dasharray: 2 4; }
+.t-dot { transition: opacity .15s; }
 .graph-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: var(--dim); font-size: 12px; text-align: center; padding: 30px; pointer-events: none; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 12px; padding: 9px 14px; border-top: 1px solid var(--border);
