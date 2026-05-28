@@ -220,6 +220,10 @@
     const d = $("#detail");
     const r = state.selectedRecId && recById.get(state.selectedRecId);
     if (!r) {
+      // A session is selected (drill-down) but no specific record — show the session card.
+      const s =
+        state.selectedSessId && sessByContentId.get(state.selectedSessId);
+      if (s) return renderSessionDetail(d, s);
       d.className = "detail placeholder";
       d.textContent =
         "Select a result or a node to see its full content, files, concepts, and how to resume its session.";
@@ -292,6 +296,44 @@
       box.appendChild(focus);
     } else {
       box.appendChild(el("div", "body", "(no linked session)"));
+    }
+    d.appendChild(box);
+  }
+
+  // Rendered when a session anchor is selected but no record is picked yet.
+  function renderSessionDetail(d, s) {
+    d.className = "detail";
+    d.innerHTML = "";
+    d.appendChild(
+      el("h3", null, s.label || truncate(s.title || "Session", 30)),
+    );
+    const row = el("div", "row");
+    row.appendChild(el("span", "cchip", s.project || ""));
+    if (s.obsCount != null)
+      row.appendChild(el("span", "cchip", s.obsCount + " observations"));
+    if (s.started)
+      row.appendChild(
+        el("span", "cchip", s.started.slice(0, 16).replace("T", " ")),
+      );
+    d.appendChild(row);
+    if (s.summary) {
+      const p = el("p", "body", s.summary);
+      p.style.fontStyle = "italic";
+      d.appendChild(p);
+    }
+    d.appendChild(el("div", "sub", "Session"));
+    const box = el("div", "session-box");
+    box.appendChild(el("div", "body", s.title || ""));
+    if (s.id) {
+      box.appendChild(el("code", null, "claude --resume " + s.id));
+      const btn = el("button", "btn", "Copy resume command");
+      btn.style.marginTop = "8px";
+      btn.addEventListener("click", () => {
+        copyText("claude --resume " + s.id);
+        btn.textContent = "Copied!";
+        setTimeout(() => (btn.textContent = "Copy resume command"), 1200);
+      });
+      box.appendChild(btn);
     }
     d.appendChild(box);
   }
@@ -722,8 +764,11 @@
     });
     es.addEventListener("ping", (e) => {
       const m = JSON.parse(e.data);
-      if (m.indexing && !$("#sem-status").textContent)
-        setStatus(`indexing semantic… (${m.indexed})`);
+      // only update status if it's currently empty (don't clobber search/result strings)
+      if ($("#sem-status").textContent) return;
+      if (m.enriching)
+        setStatus(`clarifying labels… (${m.enriched}/${m.enrichTotal})`);
+      else if (m.indexing) setStatus(`indexing semantic… (${m.indexed})`);
     });
     es.onerror = () => {
       /* EventSource auto-reconnects */

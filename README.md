@@ -79,6 +79,20 @@ helpers — source it from your shell rc:
 | `cresume <slug>` | reopen a session by name |
 | `cfind <phrase>` | find a past session by what was said in it |
 
+## Optional LLM clarification (DeepSeek)
+
+Set `DEEPSEEK_API_KEY` in your environment and the server will, in a background pass,
+ask the LLM for (a) a single-word topic label per session — replacing the TF-IDF
+heuristic — and (b) a 1–2 sentence "what this session was about" line that shows up in
+the detail panel when you click a session anchor. Results are cached to
+`.cache/llm.json`, keyed by content hash + prompt, so re-runs cost nothing and prompt
+tweaks invalidate naturally.
+
+**Privacy:** session content (your prompts + claude-mem observation titles) goes to
+DeepSeek's API under their TOS. If that's not acceptable for your data, leave
+`DEEPSEEK_API_KEY` unset — the page degrades cleanly to the TF-IDF labels and an
+empty session-detail card.
+
 ## Notes
 
 - Everything is local and read-only against claude-mem; nothing is written back to it.

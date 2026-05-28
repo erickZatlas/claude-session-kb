@@ -7,6 +7,7 @@ DB grows (ensure_fresh), so the API is always current.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import math
 import os
@@ -15,6 +16,8 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field
+
+import llm
 
 DB_PATH = os.path.expanduser("~/.claude-mem/claude-mem.db")
 
@@ -183,6 +186,73 @@ def _compute_session_labels(sessions: list, records: list) -> dict[str, str]:
     return labels
 
 
+def _llm_payload(session: dict, records: list) -> str:
+    """Compact representation of a session for the LLM: prompt + up to 30 obs titles/subs."""
+    parts: list[str] = []
+    t = (session.get("title") or "").strip()
+    if t:
+        parts.append(f"Prompt: {t[:200]}")
+    seen = 0
+    for r in records:
+        title = (r.get("title") or "").strip()
+        if not title:
+            continue
+        sub = (r.get("subtitle") or "").strip()
+        parts.append(f"- {title}" + (f" ({sub})" if sub else ""))
+        seen += 1
+        if seen >= 30:
+            break
+    return "\n".join(parts)[:2500]
+
+
+class Enricher:
+    """Background LLM pass that replaces a session's TF-IDF label with a clean topic and
+    attaches a 1–2 sentence summary. Mirrors the Embedder pattern: non-blocking start,
+    fire-and-forget, cached on disk via the llm module so repeats are free."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.running = False
+        self.total = 0
+        self.done = 0
+
+    def sync(self, sessions: list, records: list) -> None:
+        if not llm.is_enabled():
+            return
+        if not self._lock.acquire(blocking=False):
+            return  # another enrichment is already in flight
+        try:
+            self.running = True
+            by_sess: dict[str, list] = {}
+            for r in records:
+                m = r.get("memId")
+                if m:
+                    by_sess.setdefault(m, []).append(r)
+
+            todo: list[tuple[dict, str]] = []
+            for s in sessions:
+                payload = _llm_payload(s, by_sess.get(s["memId"], []))
+                if payload:
+                    todo.append((s, payload))
+            self.total, self.done = len(todo), 0
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                futs = [ex.submit(self._one, s, p) for s, p in todo]
+                for _ in concurrent.futures.as_completed(futs):
+                    self.done += 1
+        finally:
+            self.running = False
+            self._lock.release()
+
+    def _one(self, session: dict, payload: str) -> None:
+        lab = llm.label_for(payload)
+        summ = llm.summary_for(payload)
+        if lab:
+            session["label"] = lab[:40]
+        if summ:
+            session["summary"] = summ
+
+
 def _blob(r: dict) -> str:
     base = [os.path.basename(f) for f in r.get("files", [])]
     return " \n ".join([r["title"], r.get("subtitle", ""), r.get("text", ""), r["type"],
@@ -226,6 +296,24 @@ class Store:
             labels = _compute_session_labels(sessions, records)
             for s in sessions:
                 s["label"] = labels.get(s["memId"])
+            # Apply any already-cached LLM enrichments atomically with the reload so the
+            # fresh session dicts immediately wear the clean labels/summaries (the
+            # Enricher then only calls DeepSeek for sessions that aren't cached yet).
+            by_sess: dict[str, list] = {}
+            for r in records:
+                m = r.get("memId")
+                if m:
+                    by_sess.setdefault(m, []).append(r)
+            for s in sessions:
+                p = _llm_payload(s, by_sess.get(s["memId"], []))
+                if not p:
+                    continue
+                lab = llm.get_cached("label", p)
+                if lab:
+                    s["label"] = lab[:40]
+                summ = llm.get_cached("summary", p)
+                if summ:
+                    s["summary"] = summ
             new_max = self._db_max_epoch(con)
         finally:
             con.close()

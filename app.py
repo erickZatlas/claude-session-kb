@@ -31,13 +31,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from embeddings import Embedder
-from store import Store
+from store import Enricher, Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
 
 store = Store()
 embedder = Embedder()
+enricher = Enricher()
 _state = {"indexing": False}
 _sync_lock = threading.Lock()
 
@@ -54,12 +55,19 @@ def _index(records):
         _sync_lock.release()
 
 
+def _enrich():
+    """Background LLM pass: clean labels + session summaries via DeepSeek (cached)."""
+    enricher.sync(store.sessions, store.records)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     store.reload()
-    # Index in the background so keyword search is available immediately; the first
+    # Embed in the background so keyword search is available immediately; the first
     # run embeds everything (minutes on CPU) and caches to .cache for fast restarts.
     threading.Thread(target=_index, args=(store.records,), daemon=True).start()
+    # LLM enrichment runs alongside; degrades to TF-IDF if DEEPSEEK_API_KEY is missing.
+    threading.Thread(target=_enrich, daemon=True).start()
     yield
 
 
@@ -76,6 +84,9 @@ def api_meta():
     m = store.meta()
     m["indexing"] = _state["indexing"]
     m["indexed"] = len(embedder.ids)
+    m["enriching"] = enricher.running
+    m["enriched"] = enricher.done
+    m["enrichTotal"] = enricher.total
     return m
 
 
@@ -90,6 +101,7 @@ def api_search(
 ):
     if store.ensure_fresh():
         threading.Thread(target=_index, args=(store.records,), daemon=True).start()
+        threading.Thread(target=_enrich, daemon=True).start()
 
     sess = session or None
     used = mode
@@ -140,9 +152,14 @@ async def api_stream():
             changed = await loop.run_in_executor(None, store.ensure_fresh)
             if changed:
                 threading.Thread(target=_index, args=(store.records,), daemon=True).start()
+                threading.Thread(target=_enrich, daemon=True).start()
                 yield _sse("refresh", store.meta())
             else:
-                yield _sse("ping", {"indexing": _state["indexing"], "indexed": len(embedder.ids)})
+                yield _sse("ping", {
+                    "indexing": _state["indexing"], "indexed": len(embedder.ids),
+                    "enriching": enricher.running, "enriched": enricher.done,
+                    "enrichTotal": enricher.total,
+                })
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
