@@ -24,6 +24,7 @@ import json
 import os
 import threading
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import numpy as np
 import uvicorn
@@ -31,6 +32,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import llm
 import observe
 from embeddings import Embedder
 from store import Enricher, Store
@@ -316,6 +318,152 @@ def api_observe_one(session_id: str, sync: bool = False):
     return {"started": True, "session_id": session_id}
 
 
+def _label_from_observations(observations: list[dict],
+                             project: Optional[str]) -> Optional[str]:
+    """Pick the most-frequent topical token across a session's observation
+    titles + tags and kebab-ify it. Used to backfill labels for Phase D sessions
+    that have observations but no captured prompts (so the prompt-driven
+    `clarify_session` path can't reach them)."""
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    next_ord = 0
+    # Tags are pre-extracted, weight them higher (2x) since they're already topical.
+    for o in observations:
+        for t in (o.get("tags") or []):
+            key = t.strip()
+            if not key or len(key) < 3:
+                continue
+            if key not in counts:
+                counts[key] = 0
+                first_seen[key] = next_ord
+                next_ord += 1
+            counts[key] += 2
+        # Tokens from the title with the same extractor used at import time
+        for t in observe.extract_topical_tags(o.get("title")):
+            if not t or len(t) < 3:
+                continue
+            if t not in counts:
+                counts[t] = 0
+                first_seen[t] = next_ord
+                next_ord += 1
+            counts[t] += 1
+    if not counts:
+        return llm._to_kebab(project) if project else None
+    # Prefer multi-word / multi-token labels — they're more specific. So bias
+    # against single-token all-caps acronyms when something richer is available.
+    def score(item):
+        tok, n = item
+        rich = ("-" in tok) or ("_" in tok) or any(c.islower() for c in tok)
+        return (-n, 0 if rich else 1, first_seen[tok])
+    top = sorted(counts.items(), key=score)[0][0]
+    return llm._to_kebab(top)
+
+
+def _label_payload_for_session(session_id: str, project: Optional[str],
+                                cm_request: Optional[str]) -> str:
+    """Compact LLM payload for labelling a single session: claude-mem's
+    `request` (when present — it's a plain-English description of what the
+    session was about), plus the first 3 observation titles for added topic
+    signal."""
+    obs = capture.observations_for(session_id)
+    titles = [o.get("title") or "" for o in obs[:3] if o.get("title")]
+    parts = [f"Project: {project or 'unknown'}"]
+    if cm_request:
+        parts.append(f"Request: {cm_request.strip()[:400]}")
+    if titles:
+        parts.append("First observations:")
+        for t in titles:
+            parts.append(f"- {t.strip()[:160]}")
+    return "\n".join(parts)[:2000]
+
+
+def _backfill_labels_worker(limit: int, force: bool, use_llm: bool) -> None:
+    """Walk sessions that need a label. For each: try the LLM with the rich
+    request/observation payload; fall back to the cheap tag-frequency heuristic
+    if the LLM call fails (no API key, network blip, cache miss)."""
+    import sqlite3 as _sql
+    if not _label_lock.acquire(blocking=False):
+        return
+    try:
+        _label_state.update(running=True, done=0, failed=0)
+        cm_path = os.path.expanduser("~/.claude-mem/claude-mem.db")
+        cm = (_sql.connect(f"file:{cm_path}?mode=ro", uri=True)
+              if os.path.exists(cm_path) else None)
+        if cm is not None:
+            cm.row_factory = _sql.Row
+        try:
+            with capture._conn() as c:
+                rows = c.execute(
+                    "SELECT s.id, s.project, s.label FROM sessions s "
+                    "WHERE EXISTS (SELECT 1 FROM observations o WHERE o.session_id = s.id) "
+                    + ("" if force else "AND s.label IS NULL ")
+                    + "ORDER BY s.started_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            _label_state["total"] = len(rows)
+            for r in rows:
+                sid = r["id"]
+                project = r["project"]
+                cm_req = None
+                if cm is not None:
+                    summ = cm.execute(
+                        "SELECT request FROM session_summaries ss "
+                        "JOIN sdk_sessions s ON s.memory_session_id = ss.memory_session_id "
+                        "WHERE s.content_session_id = ? ORDER BY ss.created_at_epoch DESC LIMIT 1",
+                        (sid,),
+                    ).fetchone()
+                    cm_req = (summ["request"] if summ else None)
+                label = None
+                if use_llm and (cm_req or capture.observations_for(sid)):
+                    payload = _label_payload_for_session(sid, project, cm_req)
+                    try:
+                        label = llm.label_for(payload)
+                    except Exception:
+                        label = None
+                if not label:
+                    label = _label_from_observations(
+                        capture.observations_for(sid), project)
+                if label:
+                    capture.set_session_clarification(sid, label, None)
+                    _label_state["done"] += 1
+                else:
+                    _label_state["failed"] += 1
+        finally:
+            if cm is not None:
+                cm.close()
+    finally:
+        _label_state["running"] = False
+        _label_lock.release()
+
+
+_label_lock = threading.Lock()
+_label_state = {"running": False, "done": 0, "total": 0, "failed": 0}
+
+
+@app.post("/api/labels/backfill")
+def api_backfill_labels(limit: int = 1000, force: bool = False,
+                        use_llm: bool = True, sync: bool = False):
+    """Derive a kebab label for sessions that lack one (Phase D leftovers).
+    By default uses DeepSeek with the rich claude-mem `request` + first 3
+    observation titles as payload (good labels). Falls back to a cheap
+    tag-frequency heuristic when the LLM is unavailable.
+
+    `force=true`  → re-label every session, even ones that already have one.
+    `use_llm=false` → skip the LLM entirely; use heuristic only.
+    `sync=true`   → block until done (useful for one-shot bulk runs)."""
+    if sync:
+        _backfill_labels_worker(limit, force, use_llm)
+        return {"ok": True, **_label_state}
+    threading.Thread(target=_backfill_labels_worker,
+                     args=(limit, force, use_llm), daemon=True).start()
+    return {"started": True, "limit": limit, "force": force, "use_llm": use_llm}
+
+
+@app.get("/api/labels/status")
+def api_labels_status():
+    return dict(_label_state)
+
+
 @app.get("/api/observe/{session_id}")
 def api_observe_get(session_id: str):
     sess = capture.get_session(session_id)
@@ -413,6 +561,122 @@ def api_legacy_import(limit: int = 200):
         con.close()
     return {"ok": True, "sessions_added": sessions_added,
             "prompts_added": prompts_added}
+
+
+@app.post("/api/legacy/import-observations")
+def api_legacy_import_observations(replace: bool = False, max_sessions: int = 1000):
+    """Phase D: bulk-import claude-mem's historical observations + session
+    summaries into our store. claude-mem's `concepts` field is the generic
+    filler we ban (`how-it-works`, `what-changed`); we discard it and extract
+    fresh topical tags from each row's rich title/subtitle/narrative.
+
+    Idempotent: by default, a session that already has any observations in our
+    table is skipped (so re-running won't duplicate, and Phase C-generated rows
+    on still-active sessions are preserved). Pass ?replace=true to overwrite.
+    """
+    import sqlite3 as _sql
+    cm_path = os.path.expanduser("~/.claude-mem/claude-mem.db")
+    if not os.path.exists(cm_path):
+        raise HTTPException(404, f"claude-mem db not at {cm_path}")
+    con = _sql.connect(f"file:{cm_path}?mode=ro", uri=True)
+    con.row_factory = _sql.Row
+    summaries_set = 0
+    sessions_seeded = 0
+    sessions_imported = 0
+    obs_imported = 0
+    sessions_skipped_existing = 0
+    try:
+        # All claude-mem sessions that have at least one observation.
+        sess_rows = con.execute(
+            "SELECT DISTINCT s.content_session_id, s.memory_session_id, s.project, "
+            "       s.started_at_epoch, s.user_prompt "
+            "FROM sdk_sessions s "
+            "JOIN observations o ON o.memory_session_id = s.memory_session_id "
+            "ORDER BY s.started_at_epoch DESC LIMIT ?",
+            (max_sessions,),
+        ).fetchall()
+        for s in sess_rows:
+            sid = s["content_session_id"]
+            if not sid:
+                continue
+
+            # Ensure the session shell exists on our side (idempotent INSERT OR IGNORE).
+            if capture.get_session(sid) is None:
+                capture.import_legacy_session(
+                    session_id=sid,
+                    project=s["project"],
+                    started_at=int(s["started_at_epoch"] or 0),
+                    first_prompt=(s["user_prompt"] or None),
+                    prompts=[],  # prompts come from /api/legacy/import, not from this endpoint
+                )
+                sessions_seeded += 1
+
+            # If observations already exist on our side, skip unless replace=true.
+            if not replace and capture.observations_for(sid):
+                sessions_skipped_existing += 1
+            else:
+                obs_rows = con.execute(
+                    "SELECT type, title, subtitle, narrative, text, concepts, "
+                    "       created_at_epoch "
+                    "FROM observations WHERE memory_session_id = ? "
+                    "ORDER BY created_at_epoch",
+                    (s["memory_session_id"],),
+                ).fetchall()
+                normalized: list[dict] = []
+                for o in obs_rows:
+                    title = (o["title"] or "").strip()
+                    subtitle = (o["subtitle"] or "").strip()
+                    narrative = (o["narrative"] or "").strip()
+                    text_blob = (o["text"] or "").strip()
+                    if not title and not subtitle and not narrative and not text_blob:
+                        continue
+                    if not title:
+                        # Fall back to first sentence of richest text field available
+                        src = subtitle or narrative or text_blob
+                        title = src.split(". ", 1)[0][:200]
+                    body = narrative or subtitle or text_blob
+                    tags = observe.extract_topical_tags(title, subtitle, narrative)
+                    t = (o["type"] or "discovery").strip().lower()
+                    if t not in ("discovery", "change", "bugfix", "decision", "refactor", "feature"):
+                        t = "discovery"
+                    normalized.append({
+                        "type": t,
+                        "title": title[:200],
+                        "text": body,
+                        "tags": tags,
+                    })
+                if normalized:
+                    capture.replace_observations(sid, normalized)
+                    sessions_imported += 1
+                    obs_imported += len(normalized)
+
+            # Set summary if missing on our side. Use claude-mem's `learned`
+            # (richest) and fall back through the pipeline. Truncate generously
+            # — these summaries are human-readable detail, not a chip label.
+            existing = capture.get_session(sid) or {}
+            if not existing.get("summary"):
+                summ = con.execute(
+                    "SELECT learned, completed, request "
+                    "FROM session_summaries WHERE memory_session_id = ? "
+                    "ORDER BY created_at_epoch DESC LIMIT 1",
+                    (s["memory_session_id"],),
+                ).fetchone()
+                if summ:
+                    candidate = (summ["learned"] or summ["completed"] or
+                                 summ["request"] or "").strip()
+                    if candidate:
+                        capture.set_session_clarification(sid, None, candidate[:400])
+                        summaries_set += 1
+    finally:
+        con.close()
+    return {
+        "ok": True,
+        "sessions_seeded": sessions_seeded,
+        "sessions_imported": sessions_imported,
+        "sessions_skipped_existing": sessions_skipped_existing,
+        "observations_imported": obs_imported,
+        "summaries_set": summaries_set,
+    }
 
 
 def _sse(event: str, data: dict) -> str:

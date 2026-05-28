@@ -73,7 +73,110 @@ def _strip_fence(s: str) -> str:
 _GENERIC_TAGS = frozenset({
     "how-it-works", "what-changed", "pattern", "general", "session", "work",
     "task", "tasks", "code", "data", "thing", "stuff", "info", "things",
+    "trade-off", "tradeoff", "tradeoffs",
 })
+
+# Used by the Phase D bulk import. We deliberately do NOT call DeepSeek for the
+# 5,000+ historical rows; topical tags are extracted client-side from the rich
+# title/subtitle/narrative claude-mem already produced. Cheap, deterministic,
+# avoids burning a few dollars on a one-shot migration.
+_EXTRACT_PATTERNS = (
+    # CamelCase / PascalCase identifiers (e.g. OperaPostCharge, ChargeEvent)
+    re.compile(r"\b([A-Z][a-zA-Z]+(?:[A-Z][a-zA-Z0-9_]+)+)\b"),
+    # All-caps acronyms with optional digits (e.g. OXI, ZIF, PUEGH, ZS-5953, AWS).
+    # Stopword-checked below so SHOUTED English (RESIZE, READY, ABOUT) gets dropped.
+    re.compile(r"\b([A-Z]{2,}(?:[_\-][A-Z0-9]+)*)\b"),
+    # kebab-case multi-word (e.g. opera-cloud, no-show-fallback) — at least one hyphen
+    re.compile(r"\b([a-z]+(?:-[a-z]+){1,3})\b"),
+    # numeric IDs of 4+ digits (PMS ids, ticket numbers, ports, channel ids)
+    re.compile(r"\b(\d{4,})\b"),
+    # snake_case / dotted identifiers / filenames — require an explicit `_` or `.`
+    # in the body so plain English nouns ("window", "title", "session") can't sneak
+    # in. Matches store_capture.py, channel_property_id, app.py.
+    re.compile(r"\b([a-z][a-z0-9]*(?:[_.][a-z0-9_]+)+(?:\.[a-z]+)?)\b"),
+)
+
+# Lowercase stopwords applied to every match (regardless of pattern). Keeps
+# domain words while dropping plain English. Generous on purpose — false
+# negatives (filtering a real token) are recoverable; false positives
+# (tagging "current") pollute search.
+_TAG_STOPWORDS = frozenset({
+    # function words
+    "this", "that", "with", "from", "into", "their", "have", "been",
+    "the", "and", "but", "for", "you", "are", "was", "were", "they",
+    "we", "my", "our", "your", "his", "her", "its", "all", "any",
+    "to", "in", "on", "at", "of", "as", "by", "or", "if", "is", "be",
+    "do", "did", "done", "what", "when", "where", "why", "how", "who",
+    "via", "use", "used", "make", "made", "set", "got", "has", "had",
+    # SHOUTED English the all-caps pattern would otherwise catch
+    "resize", "ready", "about", "while", "should", "would", "could",
+    "must", "will", "shall", "true", "false", "null", "yes", "open",
+    "close", "edit", "save", "load", "read", "write", "start", "stop",
+    # generic project nouns
+    "session", "sessions", "work", "task", "tasks", "info", "data",
+    "code", "thing", "things", "stuff", "phase", "phases", "step", "steps",
+    "feature", "features", "bug", "bugs", "fix", "fixes", "change", "changes",
+    "title", "subtitle", "body", "header", "footer", "window", "bar", "mode",
+    "current", "previous", "next", "old", "new", "first", "last", "final",
+    "result", "results", "output", "input", "value", "values", "list", "lists",
+    "object", "objects", "item", "items", "field", "fields", "row", "rows",
+    "table", "tables", "file", "files", "line", "lines", "page", "pages",
+    "user", "users", "system", "systems", "config", "settings",
+    "name", "names", "type", "types", "kind", "kinds", "form", "forms",
+    "way", "ways", "case", "cases", "part", "parts", "side", "sides",
+    "issue", "issues", "problem", "problems", "solution", "solutions",
+    "approach", "method", "methods", "tool", "tools", "test", "tests",
+    "review", "reviews", "report", "reports", "comment", "comments",
+    "support", "supported", "available", "enabled", "disabled",
+    "main", "core", "base", "default", "common", "general", "specific",
+    "simple", "complex", "small", "large", "big", "tiny", "huge",
+    "good", "bad", "best", "worst", "high", "low", "fast", "slow",
+    "make-up", "true-positive", "false-positive",  # multi-word noise
+})
+
+
+def extract_topical_tags(*texts: Optional[str], max_tags: int = 5) -> list[str]:
+    """Extract domain-specific tags from raw text using regex patterns. Used for
+    Phase D bulk import — preserves claude-mem's historical observations with
+    decent tags without paying for thousands of LLM calls. The kebab/snake
+    branches are stopword-filtered so we don't tag every paragraph with
+    'the-and-but'; CamelCase, all-caps and numeric ID matches pass through."""
+    counts: dict[str, int] = {}
+    order: dict[str, int] = {}
+    next_ord = 0
+    for chunk in texts:
+        if not chunk:
+            continue
+        for i, pat in enumerate(_EXTRACT_PATTERNS):
+            for m in pat.findall(chunk):
+                token = m.strip()
+                if not token or len(token) < 3 or len(token) > 40:
+                    continue
+                key = token
+                # Stopword filter applies only to lowercase patterns (kebab + snake).
+                if i >= 2 and token.lower() in _TAG_STOPWORDS:
+                    continue
+                if token.lower() in _GENERIC_TAGS:
+                    continue
+                if key not in counts:
+                    counts[key] = 0
+                    order[key] = next_ord
+                    next_ord += 1
+                counts[key] += 1
+    # Sort by frequency desc, then by first-seen order for deterministic output
+    ranked = sorted(counts.items(),
+                    key=lambda kv: (-kv[1], order[kv[0]]))
+    seen_lower: set[str] = set()
+    out: list[str] = []
+    for tok, _ in ranked:
+        lo = tok.lower()
+        if lo in seen_lower:
+            continue
+        seen_lower.add(lo)
+        out.append(tok)
+        if len(out) >= max_tags:
+            break
+    return out
 
 
 def _clean_tags(raw) -> list[str]:
