@@ -90,14 +90,15 @@ def _ensure_client():
 # Prompts are module constants so the cache key includes them — any prompt tweak
 # automatically invalidates stale entries instead of returning the old answer.
 LABEL_SYSTEM = (
-    "Return EXACTLY ONE plain word that captures the topic of this work session — "
-    "a single noun, scannable at a glance. No spaces, no hyphens, NO CamelCase "
-    "compounds (do not glue two ideas together — pick the more important one). "
-    "It MUST be a real English word or a well-known acronym (OXI, ZIF, PMS, TLS, BEM, IHG). "
-    "If the user's prompt contains obvious typos, correct them — e.g. 'reservals' → "
-    "'Reversals', 'updaate' → 'Update'. Never echo a misspelled token. "
-    "Examples: Bimester, Charges, Opera, Webhook, Refactoring, Sandbox, Outage, Reversals. "
-    "Output only that one word."
+    "Return a kebab-case label that captures the topic of this work session — "
+    "between 1 and 3 lowercase words joined by single hyphens. Prefer 2–3 words "
+    "when two concepts are worth keeping (one specific + one generic = good); "
+    "a single word is fine if one concept dominates. Real English words or known "
+    "acronyms (lowercased: oxi, zif, pms, tls, bem, ihg). Correct typos — never "
+    "echo a misspelled token. "
+    "Examples: stuck-charges, opera-cloud, ihg-awaiting-checkin, no-show-fallback, "
+    "bimester, payment-reconciliation, oxi-outage, claude-mem-kb. "
+    "Output only the label."
 )
 SUMMARY_SYSTEM = (
     "Summarize what this work session was about in 1–2 short, plain sentences "
@@ -157,21 +158,30 @@ def get_cached(kind: str, payload: str) -> Optional[str]:
     raw = _cache.get(_hash(kind, payload))
     if raw is None:
         return None
-    return _one_word(raw) if kind == "label" else raw
+    return _to_kebab(raw) if kind == "label" else raw
 
 
-def _one_word(text: Optional[str]) -> Optional[str]:
-    """Defensive: keep only the first whitespace-separated token, strip punctuation."""
+def _to_kebab(text: Optional[str]) -> Optional[str]:
+    """Normalize whatever the model returns into kebab-case (1–3 lowercase tokens
+    joined by hyphens, cap ~24 chars; never cut mid-word). Defensive on read AND
+    write so display invariants hold regardless of how the cache entry was first
+    stored."""
     if not text:
         return None
-    head = text.strip().split()[0] if text.strip() else ""
-    head = re.sub(r"^[^\w]+|[^\w]+$", "", head)  # trim leading/trailing punctuation
-    return head[:24] or None
+    s = re.sub(r"[^a-z0-9]+", "-", text.strip().lower()).strip("-")
+    if not s:
+        return None
+    parts = [p for p in s.split("-") if p][:3]
+    out = "-".join(parts)
+    # if too long, drop trailing words instead of cutting mid-word
+    while len(out) > 24 and "-" in out:
+        out = out.rsplit("-", 1)[0]
+    return out[:24].rstrip("-") or None
 
 
 def label_for(payload: str) -> Optional[str]:
-    """Return a single-word topic for the session (or None)."""
-    return _one_word(_call("label", payload, max_tokens=12))
+    """Return a kebab-case topic label for the session (or None)."""
+    return _to_kebab(_call("label", payload, max_tokens=16))
 
 
 def summary_for(payload: str) -> Optional[str]:

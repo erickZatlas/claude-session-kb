@@ -60,6 +60,17 @@ def _enrich():
     enricher.sync(store.sessions, store.records)
 
 
+def _refresh_and_kick() -> bool:
+    """Reload the store if claude-mem grew; if it did, kick background indexing and
+    LLM enrichment for whatever new records arrived. Every read endpoint should call
+    this so freshness + enrichment stay in step on the same code path."""
+    if store.ensure_fresh():
+        threading.Thread(target=_index, args=(store.records,), daemon=True).start()
+        threading.Thread(target=_enrich, daemon=True).start()
+        return True
+    return False
+
+
 @asynccontextmanager
 async def lifespan(_app):
     store.reload()
@@ -80,7 +91,7 @@ def _clean(r: dict) -> dict:
 
 @app.get("/api/meta")
 def api_meta():
-    store.ensure_fresh()
+    _refresh_and_kick()
     m = store.meta()
     m["indexing"] = _state["indexing"]
     m["indexed"] = len(embedder.ids)
@@ -99,9 +110,7 @@ def api_search(
     session: str = "",
     limit: int = 250,
 ):
-    if store.ensure_fresh():
-        threading.Thread(target=_index, args=(store.records,), daemon=True).start()
-        threading.Thread(target=_enrich, daemon=True).start()
+    _refresh_and_kick()
 
     sess = session or None
     used = mode
@@ -127,7 +136,7 @@ def api_record(rec_id: str):
 
 @app.get("/api/graph")
 def api_graph(project: str = "all"):
-    store.ensure_fresh()
+    _refresh_and_kick()
     return store.session_graph(project)
 
 
