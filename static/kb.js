@@ -42,6 +42,79 @@
   const truncate = (s, n) =>
     s && s.length > n ? s.slice(0, n - 1) + "…" : s || "";
 
+  // Stopwords for the per-observation one-word label heuristic.
+  const STOP = new Set([
+    "the",
+    "and",
+    "that",
+    "for",
+    "with",
+    "this",
+    "from",
+    "they",
+    "have",
+    "been",
+    "about",
+    "into",
+    "your",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "will",
+    "there",
+    "only",
+    "also",
+    "some",
+    "most",
+    "just",
+    "like",
+    "then",
+    "than",
+    "because",
+    "such",
+    "these",
+    "those",
+    "much",
+    "more",
+    "were",
+    "does",
+    "session",
+    "task",
+    "tasks",
+    "work",
+    "want",
+    "need",
+    "make",
+    "using",
+    "into",
+    "over",
+    "under",
+    "across",
+  ]);
+
+  // Pick the most distinctive single token from a record's title.
+  // Prefers UPPER_SNAKE acronyms (AWAITING_CHECKIN), then InitialCap, then longest.
+  function topToken(text) {
+    if (!text) return null;
+    const toks = (text.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || []).filter(
+      (t) => !STOP.has(t.toLowerCase()) && !/^\d+$/.test(t),
+    );
+    if (!toks.length) return null;
+    const score = (t) =>
+      t.length +
+      (/^[A-Z][A-Z0-9_]+$/.test(t) ? 12 : 0) +
+      (/^[A-Z]/.test(t) ? 3 : 0);
+    toks.sort((a, b) => score(b) - score(a));
+    return toks[0].slice(0, 20);
+  }
+
+  // Single-word label for an observation/summary record — defers to a server-provided
+  // r.label if present, otherwise picks a distinctive token from the title.
+  const recordLabel = (r) =>
+    r.label || topToken(r.title) || truncate(r.title, 14);
+
   async function api(path) {
     const r = await fetch(path);
     if (!r.ok) throw new Error(`${path} → ${r.status}`);
@@ -455,7 +528,7 @@
     focus.forEach((r) => {
       addNode(r.id, {
         kind: r.kind,
-        label: truncate(r.title, 26),
+        label: recordLabel(r),
         color: TYPE_COLOR[r.type] || "#6b7280",
         r: 5.5,
         ref: r.id,
@@ -519,7 +592,7 @@
     const resetBtn = $("#reset-graph");
     if (state.selectedSessId) {
       if (resetBtn) resetBtn.textContent = "← all sessions";
-      return renderForce(buildSubgraph(currentRecs), { labelAll: false });
+      return renderForce(buildSubgraph(currentRecs), { labelAll: true });
     }
     if (resetBtn) resetBtn.textContent = "Reset view";
     if (state.query)
@@ -533,8 +606,13 @@
     renderForce(buildOverview(gd), { labelAll: true });
   }
 
+  // Remembered between renderForce() and setActive() so the active-node highlight
+  // doesn't accidentally hide all the non-session labels in drill-down.
+  let currentLabelAll = false;
+
   function renderForce(g, opts) {
     opts = opts || {};
+    currentLabelAll = !!opts.labelAll;
     const wrap = $("#graph-wrap");
     const W = wrap.clientWidth || 600,
       H = wrap.clientHeight || 500;
@@ -711,7 +789,11 @@
     rootG
       .selectAll(".gnode text")
       .style("display", (d) =>
-        d.kind === "session" || (nodeId && neighbors.has(d.id)) ? null : "none",
+        currentLabelAll ||
+        d.kind === "session" ||
+        (nodeId && neighbors.has(d.id))
+          ? null
+          : "none",
       );
     rootG.selectAll(".glink").classed("dim", (d) => {
       if (!nodeId) return false;
