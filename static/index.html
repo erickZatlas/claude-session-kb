@@ -91,7 +91,15 @@
     <li><span class="toc-num">02</span><a href="#slug">One slug, everywhere</a></li>
     <li><span class="toc-num">03</span><a href="#lifecycle">The task lifecycle &amp; commands</a></li>
     <li><span class="toc-num">04</span><a href="#memory">The memory ecosystem</a></li>
-    <li><span class="toc-num">05</span><a href="#kb">Your knowledge base</a></li>
+    <li><span class="toc-num">05</span><a href="#kb">Your knowledge base &mdash; what it is</a></li>
+    <li><span class="toc-num">06</span><a href="#views">The two views: overview &amp; drill-down</a></li>
+    <li><span class="toc-num">07</span><a href="#search">Searching: keyword vs semantic</a></li>
+    <li><span class="toc-num">08</span><a href="#filters">Filters &amp; modes</a></li>
+    <li><span class="toc-num">09</span><a href="#reading">Reading the graph</a></li>
+    <li><span class="toc-num">10</span><a href="#workflows">Workflows &mdash; how you'll use it</a></li>
+    <li><span class="toc-num">11</span><a href="#freshness">Live freshness &amp; LLM clarification</a></li>
+    <li><span class="toc-num">12</span><a href="#arch">Under the hood</a></li>
+    <li><span class="toc-num">13</span><a href="#cheatsheet">Quick reference</a></li>
   </ul>
 </div>
 
@@ -159,13 +167,209 @@
 </ul>
 
 <!-- 05 -->
-<h2 id="kb"><span class="section-num">SECTION 05</span>Your knowledge base</h2>
-<p>The bottom layer &mdash; claude-mem &mdash; holds thousands of observations and session summaries from your past work. The knowledge base makes it browsable: a graph of how sessions, observations, files and concepts connect, plus full-text search across everything.</p>
+<h2 id="kb"><span class="section-num">SECTION 05</span>Your knowledge base &mdash; what it is</h2>
+<p>The bottom layer &mdash; claude-mem &mdash; holds thousands of observations and session summaries from your past work. The knowledge base makes that searchable and navigable: a graph of how sessions, observations, files and concepts connect, plus full-text and semantic search across everything.</p>
 <a class="cta" href="kb.html">Open your knowledge base &rarr;</a>
 <div class="callout info">
   <span class="callout-icon">&#8505;</span>
   <div class="callout-body"><strong>Local &amp; live</strong>
-  <p>A small FastAPI backend (<code>python app.py</code>) reads <code>~/.claude-mem</code> read-only and stays current as you work &mdash; keyword and semantic search run server-side, and an SSE channel refreshes the page when new entries land. Nothing is written back, nothing leaves your machine.</p></div>
+  <p>A small FastAPI backend (<code>python app.py</code>) reads <code>~/.claude-mem</code> read-only and stays current as you work &mdash; search runs server-side, and an SSE channel refreshes the page when new entries land. Nothing is written back, nothing leaves your machine (except optional, opt-in LLM clarification &mdash; section 11).</p></div>
+</div>
+<p>The rest of this page is the full guide: how the KB is organised, how to search and filter, how to read the graph, and the workflows it's actually good for.</p>
+
+<!-- 06 -->
+<h2 id="views"><span class="section-num">SECTION 06</span>The two views: overview &amp; drill-down</h2>
+<p>The KB only ever shows one of two things, and you flip between them by clicking.</p>
+<h3>Overview &mdash; a map of your sessions</h3>
+<p>The default view. <strong>Each node is one session</strong>, sized by how many observations it produced, labelled with a single distinctive word picked by the LLM (or by TF-IDF as a fallback). Two sessions are linked when they share files &mdash; meaning the same code or content showed up in both. Common-to-everyone files (think <code>app.py</code>, <code>README.md</code>) are filtered out so the links actually mean something.</p>
+<div class="callout tip">
+  <span class="callout-icon">&#127757;</span>
+  <div class="callout-body"><strong>What overview is for</strong>
+  <p>Spotting clusters of related work, finding which sessions touched the same area of the codebase, getting your bearings on a project.</p></div>
+</div>
+<h3 class="blue">Drill-down &mdash; one session expanded</h3>
+<p>Click any session node and the graph swaps to drill-down. The session itself becomes the centre. Its observations and summaries fan out as smaller coloured nodes (colours described in section 09). Each is labelled with one distinctive token from <em>its own</em> title. The <strong>&larr; all sessions</strong> button (top of the graph pane) takes you back.</p>
+<div class="callout muted">
+  <span class="callout-icon">&#128279;</span>
+  <div class="callout-body"><strong>Search interacts with the view</strong>
+  <p>When you type a query in <em>overview</em>, the map narrows to the sessions that contain hits, sized by how many. When you type in <em>drill-down</em>, the results list on the right ranks within the current session.</p></div>
+</div>
+
+<!-- 07 -->
+<h2 id="search"><span class="section-num">SECTION 07</span>Searching: keyword vs semantic</h2>
+<p>Two modes; one button. The chip in the toolbar toggles between them.</p>
+<h3>Keyword</h3>
+<p>Substring + token match across record title, subtitle, full text, facts, concepts, and file basenames. Server-side, ranked by where the match landed (title hits weighted higher). Instant. The default.</p>
+<p>Use it when you remember a literal word from the data: an identifier (<code>AWAITING_CHECKIN</code>), a session id prefix, a file name, a hotel code, a person's name.</p>
+<h3 class="amber">Semantic</h3>
+<p>Toggle the <em>semantic</em> chip. Your query is embedded server-side with the same <code>all-MiniLM-L6-v2</code> model used to embed the records, then ranked by cosine similarity. <strong>No keyword overlap required &mdash; it finds matches by meaning.</strong></p>
+<p>Use it when you remember the <em>shape</em> of what happened but not the words. Examples that work:</p>
+<ul>
+  <li>"why do charges get stuck and never post" &rarr; the <code>AWAITING_CHECKIN</code> deferral investigation</li>
+  <li>"alerting when a hotel integration goes down" &rarr; the OXI outage monitoring sessions</li>
+  <li>"that thing about credit card fees" &rarr; the right session even if it never said "fees"</li>
+</ul>
+<div class="callout warn">
+  <span class="callout-icon">&#9201;</span>
+  <div class="callout-body"><strong>First semantic search is slow</strong>
+  <p>On the very first run, the server has to embed every record once (~5&ndash;6&nbsp;min on CPU). It's cached afterward, so every restart and every later search is instant. The toolbar shows <code>indexing semantic…</code> while it's building.</p></div>
+</div>
+
+<!-- 08 -->
+<h2 id="filters"><span class="section-num">SECTION 08</span>Filters &amp; modes</h2>
+<p>Three controls in the toolbar compose freely with search.</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Control</th><th>What it does</th></tr></thead>
+<tbody>
+  <tr><td>project dropdown</td><td>Limits the graph and the results to one project (e.g. <code>zatlas-pms-middleware</code>). Default: all projects.</td></tr>
+  <tr><td>kind chips: all / observations / summaries</td><td>Filters records by type. Observations are claude-mem's atomic findings; summaries are session-level rollups (request / investigated / learned / completed / next steps).</td></tr>
+  <tr><td>mode chips: keyword / semantic</td><td>Switches search backend &mdash; covered in section 07.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Everything composes. A typical query: <em>semantic + project="pms-middleware" + kind="summaries"</em> &mdash; "show me session-level rollups in this project that semantically match my phrase."</p>
+
+<!-- 09 -->
+<h2 id="reading"><span class="section-num">SECTION 09</span>Reading the graph</h2>
+<p>The graph is the centerpiece &mdash; learning to read it makes the whole tool faster to use.</p>
+<h3>Node colours</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Colour</th><th>Means</th></tr></thead>
+<tbody>
+  <tr><td>Teal (<code>#5eead4</code>)</td><td>A <strong>session</strong> &mdash; the anchor in drill-down, or a session in the overview map</td></tr>
+  <tr><td>Blue (<code>#60a5fa</code>)</td><td><strong>Discovery</strong> &mdash; an observation that captured something learned</td></tr>
+  <tr><td>Violet (<code>#a78bfa</code>)</td><td><strong>Summary</strong> or <strong>decision</strong> &mdash; structured rollups, decisions made</td></tr>
+  <tr><td>Red (<code>#fb7185</code>)</td><td><strong>Bugfix</strong> &mdash; observations from fixing something broken</td></tr>
+  <tr><td>Amber (<code>#fbbf24</code>)</td><td><strong>Change</strong> &mdash; observations from doing/modifying something</td></tr>
+  <tr><td>Slate (<code>#7c89a3</code>)</td><td><strong>File or concept connector</strong> &mdash; the shared link, not a record itself</td></tr>
+</tbody>
+</table>
+</div>
+<p>Node <strong>size</strong> encodes activity: session anchors are sized by their observation count; in drill-down all observation nodes are the same small size.</p>
+<h3 class="purple">Edges</h3>
+<ul>
+  <li><strong>Solid edge</strong> &mdash; "owns" link: a session owns its observation</li>
+  <li><strong>Dashed edge</strong> &mdash; shared file or concept (in drill-down, when an observation links to a file connector)</li>
+  <li><strong>Thicker edge</strong> &mdash; stronger weight (more shared files between two sessions in overview)</li>
+</ul>
+<h3 class="amber">Interactions</h3>
+<ul>
+  <li><strong>Click a session node</strong> &mdash; drill into it. The button changes to <em>&larr; all sessions</em>.</li>
+  <li><strong>Click an observation node</strong> &mdash; the detail panel on the right fills with its full text, facts, files, concepts, and a copy-resume button. Its neighbours stay visible; everything else dims.</li>
+  <li><strong>Hover any node</strong> &mdash; same as click but temporary: neighbours highlight, label is revealed.</li>
+  <li><strong>Click a file or concept connector</strong> (slate / amber node) &mdash; sets that term as the search query and filters globally.</li>
+  <li><strong>Click a result row</strong> in the list &mdash; selects it in the graph too (graph and list stay in sync).</li>
+  <li><strong>Reset view</strong> button &mdash; clears selection in overview; returns to the session map from drill-down.</li>
+</ul>
+
+<!-- 10 -->
+<h2 id="workflows"><span class="section-num">SECTION 10</span>Workflows &mdash; how you'll use it</h2>
+<p>These are the actual jobs the KB is good at. Each is one or two clicks.</p>
+<h3>"What was that session about?"</h3>
+<ol>
+  <li>Look at the graph &mdash; the LLM-picked topic word is the label.</li>
+  <li>Hover for the session title; click for the 1&ndash;2 sentence summary in the detail panel.</li>
+</ol>
+<h3>"Find a past investigation by what was said in it"</h3>
+<ol>
+  <li>Switch to <em>semantic</em>.</li>
+  <li>Describe it in plain language &mdash; the way you'd say it out loud.</li>
+  <li>Top result lands the right session even with no keyword overlap.</li>
+</ol>
+<h3 class="blue">"Recover a Claude Code conversation"</h3>
+<ol>
+  <li>Find the session (overview, search, or drill-down).</li>
+  <li>Click it &mdash; detail panel shows the session card.</li>
+  <li><strong>Copy resume command</strong> button &rarr; paste in your terminal: <code>claude --resume &lt;uuid&gt;</code>.</li>
+  <li>You're back in that conversation with full context.</li>
+</ol>
+<h3 class="amber">"What sessions touched my file X?"</h3>
+<ol>
+  <li>Drill into any session that touched the file.</li>
+  <li>Look for the slate file-connector node labelled <code>X</code>.</li>
+  <li>Click it &mdash; search filters globally to records that mention <code>X</code>.</li>
+</ol>
+<h3 class="red">"Show me only this project"</h3>
+<ol>
+  <li>Project dropdown &rarr; pick the project.</li>
+  <li>The graph rebuilds with just that project's sessions and shared-file links.</li>
+</ol>
+<h3 class="purple">"Did I already solve this?"</h3>
+<ol>
+  <li>Semantic search a description of the problem.</li>
+  <li>If it returns a session: drill in to read the summary + observations. Usually faster than re-solving.</li>
+</ol>
+
+<!-- 11 -->
+<h2 id="freshness"><span class="section-num">SECTION 11</span>Live freshness &amp; LLM clarification</h2>
+<h3>Live freshness (always on)</h3>
+<p>The browser keeps an <code>EventSource</code> open to <code>/api/stream</code>. Every few seconds the server checks if claude-mem grew (new observations from your active Claude Code sessions). When it does, the server reloads in place and pushes a <code>refresh</code> event &mdash; the page silently re-runs the current view and you see <em>"↻ updated with new entries"</em> flash in the status bar.</p>
+<p>You never restart the server, never reload the page. The KB stays in sync with whatever Claude Code is doing.</p>
+<h3 class="amber">LLM clarification (optional, opt-in)</h3>
+<p>If <code>DEEPSEEK_API_KEY</code> is set in the environment, a background pass asks DeepSeek for:</p>
+<ul>
+  <li><strong>A one-word topic label per session</strong> &mdash; replacing the TF-IDF heuristic; smarter, corrects typos, prefers real English/domain words</li>
+  <li><strong>A 1&ndash;2 sentence summary per session</strong> &mdash; shown in the detail panel when you click a session anchor</li>
+</ul>
+<p>Cost is pennies on the first run; everything caches to <code>.cache/llm.json</code> keyed by content hash + prompt. New sessions get enriched incrementally. The toolbar shows <code>clarifying labels…</code> while it runs.</p>
+<div class="callout warn">
+  <span class="callout-icon">&#128274;</span>
+  <div class="callout-body"><strong>Privacy</strong>
+  <p>Enabling LLM clarification sends session content (your prompts + observation titles) to DeepSeek's API under their TOS. claude-mem can contain confidential project data. To disable: <code>unset DEEPSEEK_API_KEY</code> &mdash; the tool falls back to TF-IDF labels and skips summaries with no errors.</p></div>
+</div>
+
+<!-- 12 -->
+<h2 id="arch"><span class="section-num">SECTION 12</span>Under the hood</h2>
+<p>The whole thing is one Python process and one HTML page.</p>
+<div class="diagram">
+  <div class="diagram-title">data flow</div>
+  <svg id="d-arch" viewBox="0 0 620 280"></svg>
+  <div class="diagram-caption">Hover any box to highlight what it touches. claude-mem is read-only; nothing is ever written back.</div>
+</div>
+<ul>
+  <li><strong><code>store.py</code></strong> &mdash; loads claude-mem records into memory; rebuilds when the DB grows; computes TF-IDF labels; serves keyword search.</li>
+  <li><strong><code>embeddings.py</code></strong> &mdash; embeds records with <code>all-MiniLM-L6-v2</code>; persistent cache in <code>.cache/vectors.npy</code>; runs cosine search server-side.</li>
+  <li><strong><code>llm.py</code></strong> &mdash; optional DeepSeek client for label + summary clarification; lazy; cached to <code>.cache/llm.json</code>.</li>
+  <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + the SSE channel; serves the static frontend with no-cache headers and a version-busted script URL.</li>
+  <li><strong><code>static/kb.js</code></strong> &mdash; in-browser logic: D3 graph rendering, search debouncing, EventSource handling, detail panel.</li>
+</ul>
+<h3>API surface</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead>
+<tbody>
+  <tr><td>GET /api/meta</td><td>counts, projects, indexing + enrichment status</td></tr>
+  <tr><td>GET /api/search</td><td>ranked records (keyword | semantic, with project/kind/session filters)</td></tr>
+  <tr><td>GET /api/record/{id}</td><td>one record + its session</td></tr>
+  <tr><td>GET /api/sessions</td><td>all sessions (with labels + summaries when enriched)</td></tr>
+  <tr><td>GET /api/graph</td><td>session-overview nodes + shared-file links</td></tr>
+  <tr><td>GET /api/stream</td><td>SSE: <code>refresh</code> on data growth, <code>ping</code> with indexing/enrichment progress</td></tr>
+</tbody>
+</table>
+</div>
+
+<!-- 13 -->
+<h2 id="cheatsheet"><span class="section-num">SECTION 13</span>Quick reference</h2>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Goal</th><th>How</th></tr></thead>
+<tbody>
+  <tr><td>Open the KB</td><td><code>python3 app.py</code> &rarr; <code>http://127.0.0.1:8000/kb.html</code></td></tr>
+  <tr><td>Search by keyword</td><td>type in the search box (default mode)</td></tr>
+  <tr><td>Search by meaning</td><td>toggle <em>semantic</em> chip, then type</td></tr>
+  <tr><td>Restrict to one project</td><td>project dropdown</td></tr>
+  <tr><td>Filter by record kind</td><td>all / observations / summaries chips</td></tr>
+  <tr><td>Drill into a session</td><td>click its node in the graph</td></tr>
+  <tr><td>Back to the session map</td><td>&larr; all sessions button (top of graph pane)</td></tr>
+  <tr><td>See a record's detail</td><td>click it in the list or graph</td></tr>
+  <tr><td>Resume a Claude conversation</td><td>detail panel &rarr; <em>Copy resume command</em></td></tr>
+  <tr><td>Enable LLM clarification</td><td>set <code>DEEPSEEK_API_KEY</code>, restart server (~30 s)</td></tr>
+  <tr><td>Force re-index</td><td>delete <code>.cache/</code>, restart (~6 min first time on CPU)</td></tr>
+  <tr><td>Stop the server</td><td><code>lsof -ti tcp:8000 | xargs kill</code></td></tr>
+</tbody>
+</table>
 </div>
 
 <script>
@@ -281,6 +485,25 @@
       { from:'trans', to:'recall', dashed:true, label:'reach', lx:-20 },
       { from:'mem', to:'kb', green:true, label:'reads', lx:18 },
       { from:'mem', to:'auto', dashed:true, label:'distills', lx:20 },
+    ],
+  });
+
+  // Diagram — architecture / data flow (section 12)
+  render('d-arch', {
+    nodes:[
+      { id:'mem',   x:90,  y:140, w:150, h:64, style:'db',      mono:true, fs:10, label:'claude-mem\nSQLite + chroma\n(read-only)' },
+      { id:'store', x:310, y:60,  w:140, h:42, style:'surface', mono:true, label:'store.py' },
+      { id:'embed', x:310, y:140, w:140, h:42, style:'blue',    mono:true, label:'embeddings.py' },
+      { id:'llm',   x:310, y:220, w:160, h:42, style:'purple',  mono:true, fs:10, label:'llm.py (optional)' },
+      { id:'app',   x:510, y:140, w:90,  h:50, style:'primary', mono:true, label:'app.py\nFastAPI' },
+    ],
+    edges:[
+      { from:'mem',   to:'store', label:'records', lx:-12 },
+      { from:'mem',   to:'embed', label:'records', lx:-12 },
+      { from:'mem',   to:'llm',   dashed:true, curve:18 },
+      { from:'store', to:'app',   green:true, label:'search' },
+      { from:'embed', to:'app',   green:true, label:'cosine' },
+      { from:'llm',   to:'app',   dashed:true, label:'labels' },
     ],
   });
 })();
