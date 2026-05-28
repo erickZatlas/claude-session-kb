@@ -165,13 +165,28 @@ async def api_stream():
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# StaticFiles wrapper that disables browser caching for the frontend assets.
+# A long-cached kb.js can produce confusing label/render bugs after a deploy;
+# the static set is tiny enough that re-fetching every time is fine.
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
+
+
 @app.get("/")
 def root():
-    return FileResponse(os.path.join(STATIC, "index.html"))
+    return FileResponse(
+        os.path.join(STATIC, "index.html"),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 # Serve the rest of the frontend (kb.html, kb.js, theme.css). Mounted last so /api/* wins.
-app.mount("/", StaticFiles(directory=STATIC, html=True), name="static")
+app.mount("/", NoCacheStaticFiles(directory=STATIC, html=True), name="static")
 
 
 if __name__ == "__main__":
