@@ -33,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 
 from embeddings import Embedder
 from store import Enricher, Store
+from store_capture import CaptureStore
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -40,6 +41,7 @@ STATIC = os.path.join(HERE, "static")
 store = Store()
 embedder = Embedder()
 enricher = Enricher()
+capture = CaptureStore()  # Phase B: dual-write capture into our own SQLite
 _state = {"indexing": False}
 _sync_lock = threading.Lock()
 
@@ -207,6 +209,73 @@ def api_recall(
         if len(sessions) >= limit:
             break
     return {"sessions": sessions, "indexing": _state["indexing"]}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase B — capture pipeline. The Claude Code hook scripts at hooks/capture.py
+# POST to these endpoints on SessionStart / UserPromptSubmit / Stop. Runs in
+# parallel with claude-mem during the dual-write period.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from pydantic import BaseModel  # local import to keep startup cost out of the API
+
+
+class _CaptureStart(BaseModel):
+    session_id: str
+    project: str | None = None
+    cwd: str | None = None
+    started_at: int | None = None
+
+
+class _CapturePrompt(BaseModel):
+    session_id: str
+    text: str
+    project: str | None = None
+    cwd: str | None = None
+    ts: int | None = None
+
+
+class _CaptureEnd(BaseModel):
+    session_id: str
+    ts: int | None = None
+
+
+@app.post("/api/capture/start")
+def api_capture_start(body: _CaptureStart):
+    capture.session_start(body.session_id, body.project, body.cwd, body.started_at)
+    return {"ok": True}
+
+
+@app.post("/api/capture/prompt")
+def api_capture_prompt(body: _CapturePrompt):
+    text = (body.text or "").strip()
+    if not text:
+        return {"ok": True, "skipped": "empty"}
+    capture.record_prompt(body.session_id, text, body.project, body.cwd, body.ts)
+    return {"ok": True}
+
+
+@app.post("/api/capture/end")
+def api_capture_end(body: _CaptureEnd):
+    capture.session_end(body.session_id, body.ts)
+    return {"ok": True}
+
+
+@app.get("/api/capture/stats")
+def api_capture_stats():
+    """Dual-write health check: counts in our own SQLite vs claude-mem's."""
+    s = capture.stats()
+    s["claude_mem"] = {
+        "sessions": len(store.sessions),
+        "observations": sum(1 for r in store.records if r["kind"] == "observation"),
+        "summaries": sum(1 for r in store.records if r["kind"] == "summary"),
+    }
+    return s
+
+
+@app.get("/api/capture/sessions")
+def api_capture_sessions(limit: int = 50):
+    return {"sessions": capture.list_sessions(limit)}
 
 
 def _sse(event: str, data: dict) -> str:
