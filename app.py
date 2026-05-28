@@ -67,13 +67,19 @@ def _enrich():
 
 
 def _refresh_and_kick() -> bool:
-    """Reload the store if claude-mem grew; if it did, kick background indexing and
-    LLM enrichment for whatever new records arrived. Every read endpoint should call
-    this so freshness + enrichment stay in step on the same code path."""
-    if store.ensure_fresh():
-        threading.Thread(target=_index, args=(store.records,), daemon=True).start()
-        threading.Thread(target=_enrich, daemon=True).start()
-        return True
+    """Reload the store if our DB grew; if it did, kick background indexing and
+    LLM enrichment for whatever new records arrived. Every read endpoint should
+    call this so freshness + enrichment stay in step on the same code path.
+
+    Defensive on purpose: a missing/locked/corrupt DB must NOT take down the
+    read endpoints. We swallow any error, fall back to the in-memory snapshot."""
+    try:
+        if store.ensure_fresh():
+            threading.Thread(target=_index, args=(store.records,), daemon=True).start()
+            threading.Thread(target=_enrich, daemon=True).start()
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -266,14 +272,8 @@ def api_capture_end(body: _CaptureEnd):
 
 @app.get("/api/capture/stats")
 def api_capture_stats():
-    """Dual-write health check: counts in our own SQLite vs claude-mem's."""
-    s = capture.stats()
-    s["claude_mem"] = {
-        "sessions": len(store.sessions),
-        "observations": sum(1 for r in store.records if r["kind"] == "observation"),
-        "summaries": sum(1 for r in store.records if r["kind"] == "summary"),
-    }
-    return s
+    """Capture-store health check: row counts in our SQLite."""
+    return capture.stats()
 
 
 @app.get("/api/capture/sessions")
