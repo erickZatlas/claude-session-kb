@@ -92,10 +92,10 @@
     <li><span class="toc-num">03</span><a href="#lifecycle">The task lifecycle &amp; commands</a></li>
     <li><span class="toc-num">04</span><a href="#memory">The memory ecosystem</a></li>
     <li><span class="toc-num">05</span><a href="#kb">Your knowledge base &mdash; what it is</a></li>
-    <li><span class="toc-num">06</span><a href="#views">The two views: overview &amp; drill-down</a></li>
+    <li><span class="toc-num">06</span><a href="#views">The two views: cards overview &amp; drill-down</a></li>
     <li><span class="toc-num">07</span><a href="#search">Searching: keyword vs semantic</a></li>
-    <li><span class="toc-num">08</span><a href="#filters">Filters &amp; modes</a></li>
-    <li><span class="toc-num">09</span><a href="#reading">Reading the graph</a></li>
+    <li><span class="toc-num">08</span><a href="#filters">Filters, modes &amp; sort</a></li>
+    <li><span class="toc-num">09</span><a href="#reading">Reading the drill-down graph</a></li>
     <li><span class="toc-num">10</span><a href="#workflows">Workflows &mdash; how you'll use it</a></li>
     <li><span class="toc-num">11</span><a href="#freshness">Live freshness &amp; LLM clarification</a></li>
     <li><span class="toc-num">12</span><a href="#arch">Under the hood</a></li>
@@ -178,21 +178,22 @@
 <p>The rest of this page is the full guide: how the KB is organised, how to search and filter, how to read the graph, and the workflows it's actually good for.</p>
 
 <!-- 06 -->
-<h2 id="views"><span class="section-num">SECTION 06</span>The two views: overview &amp; drill-down</h2>
+<h2 id="views"><span class="section-num">SECTION 06</span>The two views: cards overview &amp; drill-down</h2>
 <p>The KB only ever shows one of two things, and you flip between them by clicking.</p>
-<h3>Overview &mdash; a map of your sessions</h3>
-<p>The default view. <strong>Each node is one session</strong>, sized by how many observations it produced, labelled with a single distinctive word picked by the LLM (or by TF-IDF as a fallback). Two sessions are linked when they share files &mdash; meaning the same code or content showed up in both. Common-to-everyone files (think <code>app.py</code>, <code>README.md</code>) are filtered out so the links actually mean something.</p>
+<h3>Overview &mdash; session cards (default)</h3>
+<p>The default view. The main pane is a scrollable column of <strong>session cards</strong>: each card has a kebab-case topic title (<code>stuck-charges</code>, <code>opera-cloud</code>, <code>bem-1password</code>), a strip of <em>project</em> + <em>observation count</em> + <em>relative time</em>, the LLM's 1&ndash;2 sentence summary (or the session's prompt as a fallback), and a one-click <strong>Copy resume</strong> button.</p>
+<p>The toolbar has a <em>recent</em> / <em>activity</em> sort toggle that re-orders the cards in place &mdash; recent-first when you want to see what you just did, activity-first when you want the heaviest investigations at the top.</p>
 <div class="callout tip">
-  <span class="callout-icon">&#127757;</span>
-  <div class="callout-body"><strong>What overview is for</strong>
-  <p>Spotting clusters of related work, finding which sessions touched the same area of the codebase, getting your bearings on a project.</p></div>
+  <span class="callout-icon">&#128196;</span>
+  <div class="callout-body"><strong>Why cards, not a chart</strong>
+  <p>Earlier iterations tried a force-graph map and a project-swimlane timeline. Both collapsed into noise at ~100 sessions: any 2D layout that labels every dot loses to text density. Cards put text where text belongs.</p></div>
 </div>
-<h3 class="blue">Drill-down &mdash; one session expanded</h3>
-<p>Click any session node and the graph swaps to drill-down. The session itself becomes the centre. Its observations and summaries fan out as smaller coloured nodes (colours described in section 09). Each is labelled with one distinctive token from <em>its own</em> title. The <strong>&larr; all sessions</strong> button (top of the graph pane) takes you back.</p>
+<h3 class="blue">Drill-down &mdash; one session expanded into a force graph</h3>
+<p>Click any session card and the view switches to drill-down. The session becomes the teal anchor at the centre of a force graph. Its observations and summaries fan out as smaller coloured nodes (colours described in section 09). Each is labelled with one distinctive token from <em>its own</em> title. A records list of the same observations fills the middle pane; the detail panel on the right shows whichever item you click. The <strong>&larr; all sessions</strong> button (top of the graph pane) takes you back to the cards.</p>
 <div class="callout muted">
   <span class="callout-icon">&#128279;</span>
-  <div class="callout-body"><strong>Search interacts with the view</strong>
-  <p>When you type a query in <em>overview</em>, the map narrows to the sessions that contain hits, sized by how many. When you type in <em>drill-down</em>, the results list on the right ranks within the current session.</p></div>
+  <div class="callout-body"><strong>Search re-shapes the overview</strong>
+  <p>Typing a query in cards mode swaps the cards from <em>sessions</em> to <em>records</em> (observations and summaries) &mdash; one card per hit, ranked by the API, with a clickable <code>from session: &lt;kebab&gt;</code> link that drills into the source session. The sort chips hide; relevance is the order.</p></div>
 </div>
 
 <!-- 07 -->
@@ -216,52 +217,51 @@
 </div>
 
 <!-- 08 -->
-<h2 id="filters"><span class="section-num">SECTION 08</span>Filters &amp; modes</h2>
-<p>Three controls in the toolbar compose freely with search.</p>
+<h2 id="filters"><span class="section-num">SECTION 08</span>Filters, modes &amp; sort</h2>
+<p>Four toolbar controls compose freely with search.</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Control</th><th>What it does</th></tr></thead>
 <tbody>
-  <tr><td>project dropdown</td><td>Limits the graph and the results to one project (e.g. <code>zatlas-pms-middleware</code>). Default: all projects.</td></tr>
-  <tr><td>kind chips: all / observations / summaries</td><td>Filters records by type. Observations are claude-mem's atomic findings; summaries are session-level rollups (request / investigated / learned / completed / next steps).</td></tr>
+  <tr><td>project dropdown</td><td>Limits the cards and the search results to one project (e.g. <code>zatlas-pms-middleware</code>). Default: all projects.</td></tr>
+  <tr><td>kind chips: all / observations / summaries</td><td>In search mode, restricts the result records by type. Observations are claude-mem's atomic findings; summaries are session-level rollups (request / investigated / learned / completed / next steps).</td></tr>
   <tr><td>mode chips: keyword / semantic</td><td>Switches search backend &mdash; covered in section 07.</td></tr>
+  <tr><td>sort chips: recent / activity</td><td>Re-orders session cards in the overview. Hidden during search (the API's ranking is the order). Hidden in drill-down (records keep their own order). Default: <em>recent</em>.</td></tr>
 </tbody>
 </table>
 </div>
 <p>Everything composes. A typical query: <em>semantic + project="pms-middleware" + kind="summaries"</em> &mdash; "show me session-level rollups in this project that semantically match my phrase."</p>
 
 <!-- 09 -->
-<h2 id="reading"><span class="section-num">SECTION 09</span>Reading the graph</h2>
-<p>The graph is the centerpiece &mdash; learning to read it makes the whole tool faster to use.</p>
+<h2 id="reading"><span class="section-num">SECTION 09</span>Reading the drill-down graph</h2>
+<p>The drill-down is the only graph in the app. Learning to read it makes the second half of every workflow faster.</p>
 <h3>Node colours</h3>
 <div class="table-wrap">
 <table>
 <thead><tr><th>Colour</th><th>Means</th></tr></thead>
 <tbody>
-  <tr><td>Teal (<code>#5eead4</code>)</td><td>A <strong>session</strong> &mdash; the anchor in drill-down, or a session in the overview map</td></tr>
+  <tr><td>Teal (<code>#5eead4</code>)</td><td>The <strong>session anchor</strong> &mdash; the centre of the drill-down</td></tr>
   <tr><td>Blue (<code>#60a5fa</code>)</td><td><strong>Discovery</strong> &mdash; an observation that captured something learned</td></tr>
   <tr><td>Violet (<code>#a78bfa</code>)</td><td><strong>Summary</strong> or <strong>decision</strong> &mdash; structured rollups, decisions made</td></tr>
   <tr><td>Red (<code>#fb7185</code>)</td><td><strong>Bugfix</strong> &mdash; observations from fixing something broken</td></tr>
   <tr><td>Amber (<code>#fbbf24</code>)</td><td><strong>Change</strong> &mdash; observations from doing/modifying something</td></tr>
-  <tr><td>Slate (<code>#7c89a3</code>)</td><td><strong>File or concept connector</strong> &mdash; the shared link, not a record itself</td></tr>
+  <tr><td>Slate (<code>#7c89a3</code>)</td><td><strong>File connector</strong> &mdash; a file shared by two or more observations in the drilled session</td></tr>
 </tbody>
 </table>
 </div>
-<p>Node <strong>size</strong> encodes activity: session anchors are sized by their observation count; in drill-down all observation nodes are the same small size.</p>
+<p>Node <strong>size</strong> roughly tracks importance &mdash; the session anchor is biggest; observation nodes are all the same small size.</p>
 <h3 class="purple">Edges</h3>
 <ul>
-  <li><strong>Solid edge</strong> &mdash; "owns" link: a session owns its observation</li>
-  <li><strong>Dashed edge</strong> &mdash; shared file or concept (in drill-down, when an observation links to a file connector)</li>
-  <li><strong>Thicker edge</strong> &mdash; stronger weight (more shared files between two sessions in overview)</li>
+  <li><strong>Solid edge</strong> &mdash; "owns" link: the session owns its observation</li>
+  <li><strong>Dashed edge</strong> &mdash; observation &harr; file connector (the file is touched by that observation)</li>
 </ul>
 <h3 class="amber">Interactions</h3>
 <ul>
-  <li><strong>Click a session node</strong> &mdash; drill into it. The button changes to <em>&larr; all sessions</em>.</li>
-  <li><strong>Click an observation node</strong> &mdash; the detail panel on the right fills with its full text, facts, files, concepts, and a copy-resume button. Its neighbours stay visible; everything else dims.</li>
+  <li><strong>Click an observation node</strong> &mdash; the detail panel on the right fills with the full text, facts, files, concepts, and a copy-resume button. Neighbours stay visible; everything else dims.</li>
   <li><strong>Hover any node</strong> &mdash; same as click but temporary: neighbours highlight, label is revealed.</li>
-  <li><strong>Click a file or concept connector</strong> (slate / amber node) &mdash; sets that term as the search query and filters globally.</li>
-  <li><strong>Click a result row</strong> in the list &mdash; selects it in the graph too (graph and list stay in sync).</li>
-  <li><strong>Reset view</strong> button &mdash; clears selection in overview; returns to the session map from drill-down.</li>
+  <li><strong>Click a file connector</strong> (slate node) &mdash; sets the file's basename as the search query and filters globally.</li>
+  <li><strong>Click a result row</strong> in the records list &mdash; selects that observation in the graph too (graph and list stay in sync).</li>
+  <li><strong>&larr; all sessions</strong> button (top of the graph pane) &mdash; returns to the cards overview.</li>
 </ul>
 
 <!-- 10 -->
@@ -269,37 +269,41 @@
 <p>These are the actual jobs the KB is good at. Each is one or two clicks.</p>
 <h3>"What was that session about?"</h3>
 <ol>
-  <li>Look at the graph &mdash; the LLM-picked topic word is the label.</li>
-  <li>Hover for the session title; click for the 1&ndash;2 sentence summary in the detail panel.</li>
+  <li>Scan the cards &mdash; kebab title + 1&ndash;2 sentence summary is right there.</li>
+  <li>Need more? Click the card to drill in; the observation list and detail panel fill out the rest.</li>
 </ol>
 <h3>"Find a past investigation by what was said in it"</h3>
 <ol>
   <li>Switch to <em>semantic</em>.</li>
   <li>Describe it in plain language &mdash; the way you'd say it out loud.</li>
-  <li>Top result lands the right session even with no keyword overlap.</li>
+  <li>The top record cards land the right matches even with no keyword overlap; click <code>from session: &lt;kebab&gt;</code> to drill in.</li>
 </ol>
 <h3 class="blue">"Recover a Claude Code conversation"</h3>
 <ol>
-  <li>Find the session (overview, search, or drill-down).</li>
-  <li>Click it &mdash; detail panel shows the session card.</li>
-  <li><strong>Copy resume command</strong> button &rarr; paste in your terminal: <code>claude --resume &lt;uuid&gt;</code>.</li>
-  <li>You're back in that conversation with full context.</li>
+  <li>Find the session (scroll the cards, sort by <em>recent</em>, or search).</li>
+  <li><strong>Copy resume</strong> is right on the card &mdash; one click, no drill needed.</li>
+  <li>Paste in your terminal: <code>claude --resume &lt;uuid&gt;</code>. You're back in that conversation with full context.</li>
 </ol>
 <h3 class="amber">"What sessions touched my file X?"</h3>
 <ol>
-  <li>Drill into any session that touched the file.</li>
-  <li>Look for the slate file-connector node labelled <code>X</code>.</li>
-  <li>Click it &mdash; search filters globally to records that mention <code>X</code>.</li>
+  <li>Type the filename in the search box.</li>
+  <li>Each record card shows the session it came from via the <code>from session: &lt;kebab&gt;</code> link.</li>
+  <li>Or drill into any session that touched the file and click the slate file-connector node to filter globally.</li>
 </ol>
 <h3 class="red">"Show me only this project"</h3>
 <ol>
   <li>Project dropdown &rarr; pick the project.</li>
-  <li>The graph rebuilds with just that project's sessions and shared-file links.</li>
+  <li>The cards rebuild with just that project's sessions.</li>
 </ol>
 <h3 class="purple">"Did I already solve this?"</h3>
 <ol>
   <li>Semantic search a description of the problem.</li>
-  <li>If it returns a session: drill in to read the summary + observations. Usually faster than re-solving.</li>
+  <li>If it returns a record card: read the snippet, click <code>from session</code> to drill in for the summary + sibling observations. Usually faster than re-solving.</li>
+</ol>
+<h3 class="amber">"What did I do recently?"</h3>
+<ol>
+  <li>Default cards view is already sorted by <em>recent</em>. Just scroll.</li>
+  <li>Flip to <em>activity</em> if you want the heaviest sessions at the top instead.</li>
 </ol>
 
 <!-- 11 -->
@@ -310,8 +314,8 @@
 <h3 class="amber">LLM clarification (optional, opt-in)</h3>
 <p>If <code>DEEPSEEK_API_KEY</code> is set in the environment, a background pass asks DeepSeek for:</p>
 <ul>
-  <li><strong>A one-word topic label per session</strong> &mdash; replacing the TF-IDF heuristic; smarter, corrects typos, prefers real English/domain words</li>
-  <li><strong>A 1&ndash;2 sentence summary per session</strong> &mdash; shown in the detail panel when you click a session anchor</li>
+  <li><strong>A kebab-case topic label per session</strong> &mdash; 1&ndash;3 lowercase words joined by hyphens (<code>stuck-charges</code>, <code>opera-cloud</code>, <code>ihg-awaiting-checkin</code>), replacing the TF-IDF heuristic. Corrects typos, prefers real English/domain words.</li>
+  <li><strong>A 1&ndash;2 sentence summary per session</strong> &mdash; shown directly on every session card and in the detail panel.</li>
 </ul>
 <p>Cost is pennies on the first run; everything caches to <code>.cache/llm.json</code> keyed by content hash + prompt. New sessions get enriched incrementally. The toolbar shows <code>clarifying labels…</code> while it runs.</p>
 <div class="callout warn">
@@ -333,7 +337,7 @@
   <li><strong><code>embeddings.py</code></strong> &mdash; embeds records with <code>all-MiniLM-L6-v2</code>; persistent cache in <code>.cache/vectors.npy</code>; runs cosine search server-side.</li>
   <li><strong><code>llm.py</code></strong> &mdash; optional DeepSeek client for label + summary clarification; lazy; cached to <code>.cache/llm.json</code>.</li>
   <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + the SSE channel; serves the static frontend with no-cache headers and a version-busted script URL.</li>
-  <li><strong><code>static/kb.js</code></strong> &mdash; in-browser logic: D3 graph rendering, search debouncing, EventSource handling, detail panel.</li>
+  <li><strong><code>static/kb.js</code></strong> &mdash; in-browser logic: card rendering (session + record), D3 force-graph drill-down, search debouncing, EventSource handling, detail panel.</li>
 </ul>
 <h3>API surface</h3>
 <div class="table-wrap">
@@ -344,7 +348,7 @@
   <tr><td>GET /api/search</td><td>ranked records (keyword | semantic, with project/kind/session filters)</td></tr>
   <tr><td>GET /api/record/{id}</td><td>one record + its session</td></tr>
   <tr><td>GET /api/sessions</td><td>all sessions (with labels + summaries when enriched)</td></tr>
-  <tr><td>GET /api/graph</td><td>session-overview nodes + shared-file links</td></tr>
+  <tr><td>GET /api/graph</td><td>session-overview nodes + shared-file links (kept for a potential future map toggle; currently unused by the frontend)</td></tr>
   <tr><td>GET /api/stream</td><td>SSE: <code>refresh</code> on data growth, <code>ping</code> with indexing/enrichment progress</td></tr>
 </tbody>
 </table>
@@ -361,10 +365,12 @@
   <tr><td>Search by meaning</td><td>toggle <em>semantic</em> chip, then type</td></tr>
   <tr><td>Restrict to one project</td><td>project dropdown</td></tr>
   <tr><td>Filter by record kind</td><td>all / observations / summaries chips</td></tr>
-  <tr><td>Drill into a session</td><td>click its node in the graph</td></tr>
-  <tr><td>Back to the session map</td><td>&larr; all sessions button (top of graph pane)</td></tr>
-  <tr><td>See a record's detail</td><td>click it in the list or graph</td></tr>
-  <tr><td>Resume a Claude conversation</td><td>detail panel &rarr; <em>Copy resume command</em></td></tr>
+  <tr><td>Sort the cards</td><td><em>recent</em> / <em>activity</em> chips (overview only)</td></tr>
+  <tr><td>Drill into a session</td><td>click its card</td></tr>
+  <tr><td>Back to the cards</td><td>&larr; all sessions button (top of graph pane)</td></tr>
+  <tr><td>See a record's detail</td><td>click it (as a record card during search, or as a node in drill-down)</td></tr>
+  <tr><td>Jump from a record to its session</td><td>click the <code>from session: &lt;kebab&gt;</code> link on the record card</td></tr>
+  <tr><td>Resume a Claude conversation</td><td>session card or detail panel &rarr; <em>Copy resume</em></td></tr>
   <tr><td>Enable LLM clarification</td><td>set <code>DEEPSEEK_API_KEY</code>, restart server (~30 s)</td></tr>
   <tr><td>Force re-index</td><td>delete <code>.cache/</code>, restart (~6 min first time on CPU)</td></tr>
   <tr><td>Stop the server</td><td><code>lsof -ti tcp:8000 | xargs kill</code></td></tr>
