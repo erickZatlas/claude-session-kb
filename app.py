@@ -25,6 +25,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 
+import numpy as np
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -148,6 +149,64 @@ def api_graph(project: str = "all"):
 def api_sessions(project: str = "all"):
     s = store.sessions if project == "all" else [x for x in store.sessions if x["project"] == project]
     return {"sessions": s}
+
+
+@app.get("/api/recall")
+def api_recall(
+    q: str = "",
+    limit: int = 3,
+    project: str = "all",
+    exclude: str = "",
+    min_score: float = 0.30,
+):
+    """Pre-emptive recall: given a query, return the top-N most semantically similar
+    past sessions. Used by the UserPromptSubmit hook to surface related work to Claude
+    before it sees the user's prompt.
+
+    Algorithm: embed the query, cosine-score against every record vector, dedupe by
+    session (a session's score = its best matching record's score), drop anything
+    below min_score (configurable; default 0.30 keeps noise out)."""
+    _refresh_and_kick()
+    q = (q or "").strip()
+    if not q or embedder.matrix.size == 0:
+        return {"sessions": [], "indexing": _state["indexing"]}
+    qv = embedder.embed_query(q)
+    sims = embedder.matrix @ qv  # one cosine per indexed record
+    # over-fetch a generous multiple so dedupe-by-session has room
+    order = np.argsort(-sims)[: max(limit * 12, 24)]
+    seen: set[str] = set()
+    sessions = []
+    for i in order:
+        score = float(sims[i])
+        if score < min_score:
+            break  # sims are sorted desc; everything after is worse
+        rec_id = embedder.ids[int(i)]
+        r = store.rec_by_id.get(rec_id)
+        if not r:
+            continue
+        if project != "all" and r.get("project") != project:
+            continue
+        sid = r.get("sessionId")
+        if not sid or sid == exclude or sid in seen:
+            continue
+        seen.add(sid)
+        s = store.sess_by_id.get(sid)
+        if not s:
+            continue
+        sessions.append({
+            "id": sid,
+            "label": s.get("label"),
+            "title": (s.get("title") or "")[:120],
+            "summary": s.get("summary") or "",
+            "project": s.get("project"),
+            "started": s.get("started"),
+            "obsCount": s.get("obsCount", 0),
+            "score": round(score, 3),
+            "matchedTitle": (r.get("title") or "")[:160],
+        })
+        if len(sessions) >= limit:
+            break
+    return {"sessions": sessions, "indexing": _state["indexing"]}
 
 
 def _sse(event: str, data: dict) -> str:
