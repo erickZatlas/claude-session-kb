@@ -107,6 +107,13 @@ SUMMARY_SYSTEM = (
 _SYSTEM = {"label": LABEL_SYSTEM, "summary": SUMMARY_SYSTEM}
 
 
+def register_system(kind: str, prompt: str) -> None:
+    """Extension hook for other modules (e.g. observe.py) to register their own
+    system prompts. The cache key hashes the prompt text, so registering or
+    changing one automatically invalidates only its own cached entries."""
+    _SYSTEM[kind] = prompt
+
+
 def _hash(kind: str, payload: str) -> str:
     h = hashlib.sha256()
     h.update(MODEL.encode()); h.update(b"\0")

@@ -18,16 +18,18 @@ import time
 import urllib.error
 import urllib.request
 
-KB_BASE = "http://127.0.0.1:8000/api/capture"
+KB_BASE = "http://127.0.0.1:8000/api"
 TIMEOUT_S = 1.5
 
 
-def _post(path: str, payload: dict) -> None:
-    """Fire-and-forget POST. Any failure is swallowed (hook stays silent)."""
+def _post(path: str, payload: dict | None = None) -> None:
+    """Fire-and-forget POST. Any failure is swallowed (hook stays silent).
+    `path` is relative to /api (e.g. "capture/start" or "observe/<sid>")."""
     try:
+        body = json.dumps(payload or {}).encode("utf-8")
         req = urllib.request.Request(
             f"{KB_BASE}/{path}",
-            data=json.dumps(payload).encode("utf-8"),
+            data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -55,7 +57,7 @@ def main() -> None:
     project = os.path.basename(cwd) if cwd else None
 
     if event == "SessionStart":
-        _post("start", {
+        _post("capture/start", {
             "session_id": session_id,
             "project": project,
             "cwd": cwd,
@@ -64,7 +66,7 @@ def main() -> None:
     elif event == "UserPromptSubmit":
         text = (inp.get("prompt") or "").strip()
         if text:
-            _post("prompt", {
+            _post("capture/prompt", {
                 "session_id": session_id,
                 "text": text,
                 "project": project,
@@ -72,7 +74,11 @@ def main() -> None:
                 "ts": now_ms,
             })
     elif event == "Stop":
-        _post("end", {"session_id": session_id, "ts": now_ms})
+        _post("capture/end", {"session_id": session_id, "ts": now_ms})
+        # Phase C: on session end, kick off observation generation. The endpoint
+        # is synchronous server-side (one DeepSeek call), but failures are silent
+        # and the hook short timeout means even a stalled call can't block Claude.
+        _post(f"observe/{session_id}")
 
 
 if __name__ == "__main__":

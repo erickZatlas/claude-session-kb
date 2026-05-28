@@ -31,6 +31,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import observe
 from embeddings import Embedder
 from store import Enricher, Store
 from store_capture import CaptureStore
@@ -276,6 +277,142 @@ def api_capture_stats():
 @app.get("/api/capture/sessions")
 def api_capture_sessions(limit: int = 50):
     return {"sessions": capture.list_sessions(limit)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase C — observation generation. Reads captured prompts, asks DeepSeek for
+# topical observations + a session label/summary, stores them on our side.
+# The cache key includes the system prompt so prompt tuning is free.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_observe_lock = threading.Lock()
+_observe_state = {"running": False, "done": 0, "total": 0, "failed": 0}
+
+
+def _observe_one(session_id: str) -> dict:
+    """Synchronous generation for one session. Returns a small status dict."""
+    sess = capture.get_session(session_id)
+    if not sess:
+        return {"ok": False, "error": "session not found"}
+    prompts = capture.prompts_for(session_id)
+    if not prompts:
+        return {"ok": False, "error": "no prompts captured for this session"}
+    obs = observe.generate_observations(sess.get("project"), prompts)
+    label, summary = observe.clarify_session(sess.get("project"), prompts)
+    capture.set_session_clarification(session_id, label, summary)
+    n = capture.replace_observations(session_id, obs)
+    return {"ok": True, "session_id": session_id, "observations": n,
+            "label": label, "summary": summary}
+
+
+@app.post("/api/observe/{session_id}")
+def api_observe_one(session_id: str, sync: bool = False):
+    """Generate observations for one session. Default fires-and-forgets in a
+    background thread (so the Stop hook returns fast). Pass ?sync=true to wait
+    for the result — used by smoke tests and manual triggers from the UI."""
+    if sync:
+        return _observe_one(session_id)
+    threading.Thread(target=_observe_one, args=(session_id,), daemon=True).start()
+    return {"started": True, "session_id": session_id}
+
+
+@app.get("/api/observe/{session_id}")
+def api_observe_get(session_id: str):
+    sess = capture.get_session(session_id)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return {
+        "session": {k: sess.get(k) for k in ("id", "project", "first_prompt",
+                                              "label", "summary", "prompt_count")},
+        "observations": capture.observations_for(session_id),
+    }
+
+
+def _backfill_worker(limit: int) -> None:
+    """Walks captured sessions that don't have observations yet, generates each."""
+    if not _observe_lock.acquire(blocking=False):
+        return
+    try:
+        _observe_state.update(running=True, done=0, failed=0)
+        ids = capture.sessions_needing_observations(limit)
+        _observe_state["total"] = len(ids)
+        for sid in ids:
+            try:
+                res = _observe_one(sid)
+                if res.get("ok"):
+                    _observe_state["done"] += 1
+                else:
+                    _observe_state["failed"] += 1
+            except Exception:
+                _observe_state["failed"] += 1
+    finally:
+        _observe_state["running"] = False
+        _observe_lock.release()
+
+
+@app.post("/api/observe/backfill")
+def api_observe_backfill(limit: int = 200):
+    """Generate observations for every captured session that doesn't have any
+    yet. Fire-and-forget; poll status via GET /api/observe/status."""
+    threading.Thread(target=_backfill_worker, args=(limit,), daemon=True).start()
+    return {"started": True, "limit": limit}
+
+
+@app.get("/api/observe/status")
+def api_observe_status():
+    return dict(_observe_state)
+
+
+@app.post("/api/legacy/import")
+def api_legacy_import(limit: int = 200):
+    """One-shot seed of our capture DB from claude-mem's existing data so Phase C
+    has real material to generate against before new captures accumulate.
+    Idempotent: sessions/prompts already imported are skipped."""
+    import sqlite3 as _sql
+    cm_path = os.path.expanduser("~/.claude-mem/claude-mem.db")
+    if not os.path.exists(cm_path):
+        raise HTTPException(404, f"claude-mem db not at {cm_path}")
+    con = _sql.connect(f"file:{cm_path}?mode=ro", uri=True)
+    con.row_factory = _sql.Row
+    sessions_added = 0
+    prompts_added = 0
+    try:
+        rows = con.execute(
+            "SELECT content_session_id, memory_session_id, project, started_at_epoch, user_prompt "
+            "FROM sdk_sessions ORDER BY started_at_epoch DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        for r in rows:
+            sid = r["content_session_id"]
+            if not sid:
+                continue
+            existed_before = capture.get_session(sid) is not None
+            # Pull prompt texts for this session from user_prompts; fallback to user_prompt only
+            prompt_rows = con.execute(
+                "SELECT created_at_epoch, prompt_text FROM user_prompts "
+                "WHERE content_session_id = ? ORDER BY created_at_epoch",
+                (sid,),
+            ).fetchall()
+            prompts = [(int(p["created_at_epoch"] or 0),
+                        (p["prompt_text"] or "").strip())
+                       for p in prompt_rows if (p["prompt_text"] or "").strip()]
+            if not prompts and r["user_prompt"]:
+                prompts = [(int(r["started_at_epoch"] or 0),
+                            (r["user_prompt"] or "").strip())]
+            capture.import_legacy_session(
+                session_id=sid,
+                project=r["project"],
+                started_at=int(r["started_at_epoch"] or 0),
+                first_prompt=(r["user_prompt"] or (prompts[0][1] if prompts else None)),
+                prompts=prompts,
+            )
+            if not existed_before:
+                sessions_added += 1
+            prompts_added += len(prompts)
+    finally:
+        con.close()
+    return {"ok": True, "sessions_added": sessions_added,
+            "prompts_added": prompts_added}
 
 
 def _sse(event: str, data: dict) -> str:
