@@ -347,7 +347,7 @@
       id: "S:" + s.id,
       ref: s.id,
       kind: "session",
-      label: truncate(s.title, 30),
+      label: s.label || truncate(s.title, 16),
       color: SESSION_COLOR,
       r: Math.min(18, 6 + Math.sqrt(s.obsCount || 1)),
     }));
@@ -375,7 +375,7 @@
         id: "S:" + sid,
         ref: sid,
         kind: "session",
-        label: truncate(s ? s.title : "session", 30),
+        label: (s && s.label) || truncate(s ? s.title : "session", 16),
         color: SESSION_COLOR,
         r: Math.min(18, 6 + Math.sqrt(c * 3)),
       };
@@ -404,7 +404,7 @@
       const s = sessByContentId.get(sid);
       addNode("S:" + sid, {
         kind: "session",
-        label: s ? truncate(s.title, 30) : "session",
+        label: (s && s.label) || (s ? truncate(s.title, 16) : "session"),
         color: SESSION_COLOR,
         r: 12,
         ref: sid,
