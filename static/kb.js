@@ -760,10 +760,17 @@
       setCounts();
       flashFresh();
       invalidateGraphCache(); // session map may have changed
+      refreshSessions(); // labels/summaries may have been enriched server-side
       refresh(); // backend already reloaded; re-run current view
     });
+    let lastSeenEnriched = -1;
     es.addEventListener("ping", (e) => {
       const m = JSON.parse(e.data);
+      // labels may have been freshly enriched since init(); pull updated session dicts
+      if (typeof m.enriched === "number" && m.enriched !== lastSeenEnriched) {
+        lastSeenEnriched = m.enriched;
+        if (!m.enriching && m.enriched > 0) refreshSessions();
+      }
       // only update status if it's currently empty (don't clobber search/result strings)
       if ($("#sem-status").textContent) return;
       if (m.enriching)
@@ -774,6 +781,17 @@
       /* EventSource auto-reconnects */
     };
   }
+  // Re-fetch /api/sessions and update sessByContentId so label/summary changes that
+  // happened server-side (LLM enrichment, claude-mem growth) reach the client.
+  async function refreshSessions() {
+    try {
+      const s = await api("/api/sessions");
+      s.sessions.forEach((x) => sessByContentId.set(x.id, x));
+    } catch (e) {
+      /* non-fatal */
+    }
+  }
+
   function flashFresh() {
     const s = $("#sem-status");
     if (!s) return;

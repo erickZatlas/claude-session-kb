@@ -90,9 +90,12 @@ def _ensure_client():
 # Prompts are module constants so the cache key includes them — any prompt tweak
 # automatically invalidates stale entries instead of returning the old answer.
 LABEL_SYSTEM = (
-    "Return EXACTLY ONE word that captures the topic of this work session. "
-    "If two ideas need combining, use CamelCase (e.g. ChargePosting, OperaSync). "
-    "Output only that one word — no spaces, no punctuation, no preamble."
+    "Return EXACTLY ONE plain word that captures the topic of this work session — "
+    "a single noun, scannable at a glance. No spaces, no hyphens, NO CamelCase "
+    "compounds (do not glue two ideas together — pick the more important one). "
+    "Acronyms like OXI, ZIF, PMS, TLS are fine. "
+    "Examples: Bimester, Charges, Opera, Webhook, Refactoring, Sandbox, Outage, PMS. "
+    "Output only that one word."
 )
 SUMMARY_SYSTEM = (
     "Summarize what this work session was about in 1–2 short, plain sentences "
