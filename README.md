@@ -27,32 +27,23 @@ to `.cache/`, so subsequent starts are fast and only new records get embedded.
 
 ## What it looks like
 
-### Overview — session cards, sortable by recent or activity
+The UI has three pieces, all reachable from <http://127.0.0.1:8000/kb.html>:
 
-![Overview](docs/images/overview.png)
+- **Overview** — a scrollable column of session cards. Each card has a kebab-case topic
+  title (`stuck-charges`, `opera-cloud`, `bem-1password`), a project + observation-count +
+  relative-time strip, the LLM's 1–2 sentence summary, and a one-click **Copy resume**
+  button. Sort by *recent* or *activity* via the chip in the toolbar.
+- **Search** — typing a query swaps the cards from sessions to ranked **record cards** —
+  one per hit, with a type badge, snippet, project/date/files, and a clickable
+  `from session: <kebab>` link that drills into the source session. Toggle *semantic* in
+  the toolbar to rank by meaning instead of literal keyword.
+- **Drill-down** — clicking any session card opens a force graph of that session's
+  observations and summaries (colour-coded by type), a records list, and a detail pane.
+  Click **← all sessions** to return to the cards.
 
-Each card is a session: kebab-case topic title (`stuck-charges`, `opera-cloud`,
-`bem-1password`), project + observation count + relative time, an LLM-written 1–2 sentence
-summary, and a one-click **Copy resume** button. Sort by *recent* or *activity* via the
-chip in the toolbar. Click a card to drill into the session.
-
-### Search — record cards, ranked by relevance (keyword or semantic)
-
-![Search](docs/images/search.png)
-
-When you type a query the overview swaps to ranked **record cards** — each hit is a
-distinct observation or summary, with a type badge, snippet, project/date/files, and a
-`from session: <kebab>` link that drills into the source session. Toggle *semantic* in
-the toolbar to rank by meaning (server-side embedding) instead of literal keyword.
-
-### Drill-down — one session expanded into its observations
-
-![Drill-down](docs/images/drilldown.png)
-
-Click any session: the view switches to a force graph of that session's observations and
-summaries, colour-coded by record type (blue = discovery, violet = summary, red = bugfix,
-amber = change). Each one carries a single-word label picked from its own title. Click
-**← all sessions** to return to the timeline.
+The in-app guide at <http://127.0.0.1:8000> walks through every interaction in detail.
+UI screenshots are intentionally omitted from this repo because they would otherwise
+show real session content from a private claude-mem.
 
 ## How it works
 
