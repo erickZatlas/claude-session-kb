@@ -122,6 +122,86 @@
     return r.json();
   }
 
+  // ===================== URL STATE ===================
+  // URL ↔ in-memory state codec. Drives browser back/forward + makes views
+  // shareable + refresh-survives. pushHistory creates a back-step (session
+  // drill-ins, "← all sessions"); replaceHistory updates the URL silently
+  // (keystrokes, filter chips, record selection). Defaults are omitted from
+  // the URL so it stays readable: /kb.html means "default overview".
+  function _encodeURL() {
+    const p = new URLSearchParams();
+    if (state.query) p.set("q", state.query);
+    if (state.selectedSessId) p.set("session", state.selectedSessId);
+    if (state.selectedRecId && state.selectedSessId)
+      p.set("record", state.selectedRecId);
+    if (state.project !== "all") p.set("project", state.project);
+    if (state.kind !== "all") p.set("kind", state.kind);
+    if (state.mode !== "keyword") p.set("mode", state.mode);
+    if (state.sortMode !== "recent") p.set("sort", state.sortMode);
+    const qs = p.toString();
+    return qs ? location.pathname + "?" + qs : location.pathname;
+  }
+  function _decodeURL() {
+    const p = new URLSearchParams(location.search);
+    return {
+      query: p.get("q") || "",
+      selectedSessId: p.get("session") || null,
+      selectedRecId: p.get("record") || null,
+      project: p.get("project") || "all",
+      kind: p.get("kind") || "all",
+      mode: p.get("mode") || "keyword",
+      sortMode: p.get("sort") || "recent",
+    };
+  }
+  let _suppressHistory = false; // avoid re-pushing during popstate-driven restore
+  function pushHistory() {
+    if (_suppressHistory) return;
+    history.pushState(null, "", _encodeURL());
+  }
+  function replaceHistory() {
+    if (_suppressHistory) return;
+    history.replaceState(null, "", _encodeURL());
+  }
+  // Mirror URL → state → visible toolbar → re-fetch.
+  async function restoreFromURL() {
+    const incoming = _decodeURL();
+    _suppressHistory = true;
+    try {
+      Object.assign(state, incoming);
+      const s = $("#search");
+      if (s) s.value = state.query;
+      const proj = $("#proj-filter");
+      if (proj) proj.value = state.project;
+      document
+        .querySelectorAll(".chip[data-kind]")
+        .forEach((c) =>
+          c.classList.toggle("active", c.dataset.kind === state.kind),
+        );
+      document
+        .querySelectorAll(".chip[data-mode]")
+        .forEach((c) =>
+          c.classList.toggle("active", c.dataset.mode === state.mode),
+        );
+      document
+        .querySelectorAll(".chip[data-sort]")
+        .forEach((c) =>
+          c.classList.toggle("active", c.dataset.sort === state.sortMode),
+        );
+      if (s) {
+        s.placeholder =
+          state.mode === "semantic"
+            ? "Describe what you're looking for — searches by meaning…"
+            : "Search observations, summaries, facts, concepts, files…";
+      }
+      await refresh();
+    } finally {
+      _suppressHistory = false;
+    }
+  }
+  window.addEventListener("popstate", () => {
+    restoreFromURL();
+  });
+
   // ===================== INIT =====================
   async function init() {
     try {
@@ -143,6 +223,7 @@
     projSel.addEventListener("change", () => {
       state.project = projSel.value;
       clearSelection();
+      replaceHistory();
       refresh();
     });
 
@@ -154,6 +235,7 @@
         () => {
           state.query = search.value.trim();
           state.selectedSessId = null;
+          replaceHistory();
           refresh();
         },
         state.mode === "semantic" ? 300 : 120,
@@ -167,6 +249,7 @@
           .forEach((x) => x.classList.remove("active"));
         c.classList.add("active");
         state.kind = c.dataset.kind;
+        replaceHistory();
         refresh();
       }),
     );
@@ -182,6 +265,7 @@
           state.mode === "semantic"
             ? "Describe what you're looking for — searches by meaning…"
             : "Search observations, summaries, facts, concepts, files…";
+        replaceHistory();
         refresh();
       }),
     );
@@ -194,12 +278,15 @@
           .forEach((x) => x.classList.remove("active"));
         c.classList.add("active");
         state.sortMode = c.dataset.sort;
+        replaceHistory();
         renderCards(); // pure re-render; no fetch needed
       }),
     );
 
+    // "← all sessions" — push a back-step so browser back returns to the drill.
     $("#reset-graph").addEventListener("click", () => {
       clearSelection();
+      pushHistory();
       refresh();
     });
 
@@ -212,7 +299,10 @@
 
     buildLegend();
     connectSSE();
-    await refresh();
+    // Boot from URL so ?session=… / ?q=… etc. land you exactly where the URL
+    // points (refresh-survive + shareable links). Falls through to the
+    // default overview when there's no query string.
+    await restoreFromURL();
   }
 
   function setCounts() {
@@ -228,15 +318,17 @@
   async function refresh() {
     const token = ++queryToken;
     if (state.mode === "semantic" && state.query) setStatus("searching…");
+    // When drilled into a session, prefer the session filter and ignore the
+    // search box for the fetch — keeps the input visually populated so going
+    // back to overview restores the user's search context without re-typing.
     const params = new URLSearchParams({
-      q: state.query,
+      q: state.selectedSessId ? "" : state.query,
       project: state.project,
       kind: state.kind,
       mode: state.mode,
       limit: "250",
     });
-    if (state.selectedSessId && !state.query)
-      params.set("session", state.selectedSessId);
+    if (state.selectedSessId) params.set("session", state.selectedSessId);
 
     let data;
     try {
@@ -352,6 +444,9 @@
           $("#search").value = c;
           state.query = c;
           clearSelection();
+          // Concept click pivots to a fresh search — push so back returns to
+          // the record the user was reading.
+          pushHistory();
           refresh();
         });
         box.appendChild(chip);
@@ -437,13 +532,19 @@
     // highlight the matching node: the record itself when drilled into a session,
     // otherwise its session node on the overview map
     setActive(state.selectedSessId ? id : r ? "S:" + r.sessionId : null);
+    // Record selection is too granular for the back-stack (it'd explode while
+    // scrolling a results list). Update the URL silently so refresh-survival
+    // still works; browser back skips over individual record picks.
+    replaceHistory();
     renderDetail();
   }
   function selectSession(sessId) {
     state.selectedSessId = sessId;
     state.selectedRecId = null;
-    state.query = "";
-    $("#search").value = "";
+    // Preserve state.query + the visible search input so going "← all sessions"
+    // restores the user's search context. refresh() ignores the query while
+    // drilled (prefers the session filter for the fetch).
+    pushHistory();
     refresh();
   }
   function clearSelection() {
