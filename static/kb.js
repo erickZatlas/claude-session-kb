@@ -929,6 +929,72 @@
       });
   }
 
+  // Full-width "you are here" banner that sits between the toolbar and the
+  // three panes when drilled into a session. Always answers the question
+  // "which session am I in?" without forcing the user to scan the graph or
+  // wait for the right detail pane to fill. Hidden in overview mode.
+  function renderSessionBanner() {
+    let banner = document.getElementById("session-banner");
+    if (!state.selectedSessId) {
+      if (banner) banner.style.display = "none";
+      return;
+    }
+    if (!banner) {
+      banner = el("div");
+      banner.id = "session-banner";
+      banner.className = "session-banner";
+      banner.style.cssText =
+        "display:flex;align-items:center;gap:10px;flex-wrap:wrap;" +
+        "padding:10px 16px;margin:0;background:rgba(94,234,212,0.06);" +
+        "border-top:1px solid rgba(94,234,212,0.25);" +
+        "border-bottom:1px solid rgba(94,234,212,0.25);" +
+        "font-size:13px;color:var(--text,#e2e8f0);";
+      const main = document.querySelector(".kb-main");
+      if (main && main.parentNode) main.parentNode.insertBefore(banner, main);
+      else document.body.appendChild(banner);
+    }
+    banner.style.display = "flex";
+    banner.innerHTML = "";
+    const sess = sessByContentId.get(state.selectedSessId);
+    // Indicator + kebab label as the prominent identity marker
+    const dot = el("span", null, "▸");
+    dot.style.cssText = "color:#5eead4;font-weight:700;font-size:14px;";
+    banner.appendChild(dot);
+    const label = el(
+      "strong",
+      null,
+      sess
+        ? sess.label || truncate(sess.title || "session", 40)
+        : state.selectedSessId.slice(0, 8) + "…",
+    );
+    label.style.cssText = "color:#5eead4;font-size:14px;letter-spacing:0.2px;";
+    banner.appendChild(label);
+    if (sess) {
+      banner.appendChild(el("span", "cchip", sess.project || ""));
+      if (sess.worktree) {
+        const wt = el(
+          "span",
+          "cchip card-chip-worktree",
+          "wt: " + sess.worktree,
+        );
+        wt.title = "git worktree directory";
+        banner.appendChild(wt);
+      }
+      if (sess.obsCount != null) {
+        banner.appendChild(el("span", "cchip", sess.obsCount + " obs"));
+      }
+      if (sess.summary) {
+        const sum = el("span", null, sess.summary);
+        sum.style.cssText =
+          "color:#94a3b8;font-style:italic;font-size:12px;" +
+          "flex:1;min-width:200px;overflow:hidden;text-overflow:ellipsis;" +
+          "white-space:nowrap;";
+        sum.title = sess.summary;
+        banner.appendChild(sum);
+      }
+    }
+  }
+
   // Decide which graph to show: drill-down (a session selected), search overview
   // (a query active), or the default session map.
   function renderGraphView() {
@@ -939,12 +1005,14 @@
       body.classList.remove("view-cards");
       body.classList.toggle("searching", !!state.query);
       if (resetBtn) resetBtn.textContent = "← all sessions";
+      renderSessionBanner();
       return renderForce(buildSubgraph(currentRecs), { labelAll: true });
     }
     // overview: cards (graph pane hidden via .view-cards on body)
     body.classList.add("view-cards");
     body.classList.toggle("searching", !!state.query);
     if (resetBtn) resetBtn.textContent = "Reset view";
+    renderSessionBanner();
     renderCards();
   }
 
