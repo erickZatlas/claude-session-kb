@@ -224,13 +224,26 @@ class Store:
 
     def _fetch_sessions(self, con) -> list:
         """Map our sessions table -> the legacy session-dict shape.
-        memId == id since we don't keep a separate memory-session id."""
+        memId == id since we don't keep a separate memory-session id.
+
+        Phantom filter: `claude --resume` makes Claude Code mint a throwaway
+        session id during the resume handshake and fire SessionStart against
+        it before switching to the real resumed id. That leaves an orphan row
+        with no prompts, observations, or tool calls (and the enricher then
+        gives it a hallucinated summary). We skip any session that has none of
+        the three — it's either that phantom or a just-born session with
+        nothing to show yet. Self-correcting: the store reloads when the DB
+        grows, so a real session reappears the instant it records anything."""
         rows = con.execute(
             "SELECT s.id, s.project, s.cwd, s.started_at, s.ended_at, s.status, "
             "       s.first_prompt, s.prompt_count, s.label, s.summary, "
             "       (SELECT COUNT(DISTINCT path) FROM session_files sf "
             "        WHERE sf.session_id = s.id) AS files_count "
-            "FROM sessions s ORDER BY s.started_at DESC"
+            "FROM sessions s "
+            "WHERE s.prompt_count > 0 "
+            "   OR EXISTS (SELECT 1 FROM observations o WHERE o.session_id = s.id) "
+            "   OR EXISTS (SELECT 1 FROM tool_calls t WHERE t.session_id = s.id) "
+            "ORDER BY s.started_at DESC"
         ).fetchall()
         out = []
         for r in rows:
