@@ -46,6 +46,145 @@ _MODEL = llm.MODEL  # use the same DeepSeek model the rest of the app uses
 # Register our system prompt so llm._call("observations", ...) can hash + invoke it.
 llm.register_system("observations", OBSERVATIONS_SYSTEM)
 
+# Phase E.B: dedicated prompt for the tool-call summarizer. Input is a compact
+# tool timeline (Edit/Bash/Read sequence) rather than user prompts; output is
+# 1–4 observations capturing what the user *actually did* in that batch.
+TOOL_OBSERVATIONS_SYSTEM = (
+    "You read a developer's Claude Code TOOL-CALL TIMELINE (file edits, shell "
+    "commands, file reads, MCP calls, etc) and extract 1 to 4 topical observations "
+    "describing what the user actually did or learned in this batch — concrete "
+    "outcomes, not intentions.\n\n"
+    "Return a JSON ARRAY of objects, each with these exact keys:\n"
+    "  - type: one of \"discovery\" | \"change\" | \"bugfix\" | \"decision\" | "
+    "\"refactor\" | \"feature\"\n"
+    "  - title: one specific line (max ~120 chars), past-tense, naming the "
+    "concrete thing (e.g. 'Added pushHistory() to kb.js for browser back/forward')\n"
+    "  - text: 1–2 sentences with the SPECIFIC paths/identifiers touched\n"
+    "  - tags: 2–5 DOMAIN-SPECIFIC tokens — file names, function/class names, "
+    "tool names, kebab-case concepts. "
+    "NEVER use generic tags like \"how-it-works\", \"what-changed\", \"pattern\". "
+    "DO use the actual file basenames and CamelCase identifiers from the timeline.\n\n"
+    "If the timeline is mostly Reads/Greps (no Edits/Writes/Bash side-effects), "
+    "produce ONE 'discovery' observation summarising what was explored. "
+    "If the timeline is a no-op (only TodoWrite/TaskCreate etc), return an empty array [].\n\n"
+    "Output ONLY the JSON array. No prose around it, no markdown fence."
+)
+llm.register_system("tool-observations", TOOL_OBSERVATIONS_SYSTEM)
+
+# Phase E.D: cross-session lessons distiller.
+LESSONS_SYSTEM = (
+    "You read a developer's observations across MANY past sessions and extract "
+    "5 to 15 cross-session 'lessons' — durable facts, patterns, or conventions "
+    "that recur across at least 2 sessions and would be useful to remember in "
+    "future work.\n\n"
+    "Each lesson is a learning that survives a single session — something the "
+    "developer keeps re-discovering, a project convention, an architectural fact "
+    "about a specific system, a recurring bug pattern, etc. NOT a one-off task "
+    "outcome (those belong in per-session observations).\n\n"
+    "Return a JSON ARRAY of objects, each with these exact keys:\n"
+    "  - title: kebab-case (3–6 lowercase tokens joined by hyphens), e.g. "
+    "'oxi-keepalive-zombie-pattern', 'cancun-trace-format-prefix'\n"
+    "  - text: 1–3 sentences capturing the durable fact, with the specific "
+    "identifiers/systems/files involved\n"
+    "  - tags: 3–6 DOMAIN-SPECIFIC tokens (acronyms, file/class names, ticket "
+    "or PR numbers when relevant). Same anti-filler rule as observations.\n"
+    "  - source_session_ids: 2–6 session UUIDs from the input that support the "
+    "lesson\n\n"
+    "Output ONLY the JSON array. No prose around it, no markdown fence."
+)
+llm.register_system("lessons", LESSONS_SYSTEM)
+
+
+def _tool_timeline_payload(session, batch):
+    """Compact representation of a tool-call batch for the LLM. Front-loads
+    file edits + shell, then reads, then noise. Truncates aggressively —
+    DeepSeek will reject >32KB payloads."""
+    lines = [
+        f"Project: {session.get('project') or 'unknown'}",
+        f"Session label: {session.get('label') or session.get('id','')[:8]}",
+        "",
+        "Tool timeline (oldest first):",
+    ]
+    for i, t in enumerate(batch[:80], 1):
+        files = ",".join((t.get("files") or [])[:4])
+        snippet = (t.get("tool_input") or "")[:240].replace("\n", " ")
+        resp = (t.get("tool_response") or "")[:120].replace("\n", " ")
+        lines.append(
+            f"{i:3d}. {t.get('tool_name'):14}  files=[{files}]  "
+            f"input={snippet}  resp={resp}"
+        )
+    return "\n".join(lines)[:14000]
+
+
+def generate_tool_observations(session, batch):
+    """Turn a batch of tool calls into 1–4 observations. Returns [] on any
+    failure (no API key, parse error, empty batch) — the summarizer caller
+    treats [] as 'skip writing' but still marks the batch processed so it
+    doesn't get stuck in the queue."""
+    if not batch:
+        return []
+    payload = _tool_timeline_payload(session, batch)
+    raw = llm._call("tool-observations", payload, max_tokens=900)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(_strip_fence(raw))
+    except json.JSONDecodeError:
+        log.warning("tool-observations: invalid JSON: %r", raw[:200])
+        return []
+    if not isinstance(parsed, list):
+        return []
+    cleaned = []
+    for item in parsed:
+        n = _normalize(item)
+        if n:
+            cleaned.append(n)
+        if len(cleaned) >= 4:
+            break
+    return cleaned
+
+
+def distill_lessons(observations):
+    """Run the lessons prompt over a window of observations. Returns a list of
+    lesson dicts ready for capture.replace_lessons(). [] on failure."""
+    if not observations:
+        return []
+    # Compact corpus representation — one line per obs
+    lines = ["Observations from the last N days (one per line):"]
+    for o in observations[:300]:
+        tags = ",".join((o.get("tags") or [])[:5])
+        sid = (o.get("session_id") or "")[:8]
+        proj = o.get("project") or ""
+        title = (o.get("title") or "").strip()[:160]
+        lines.append(f"  [{sid}/{proj}] {title} | tags: {tags}")
+    payload = "\n".join(lines)[:24000]
+    raw = llm._call("lessons", payload, max_tokens=2200)
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(_strip_fence(raw))
+    except json.JSONDecodeError:
+        log.warning("lessons: invalid JSON: %r", raw[:200])
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out = []
+    for item in parsed[:20]:
+        if not isinstance(item, dict):
+            continue
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        out.append({
+            "title": title[:200],
+            "text": (item.get("text") or "").strip(),
+            "tags": _clean_tags(item.get("tags")),
+            "source_session_ids": [
+                s for s in (item.get("source_session_ids") or []) if isinstance(s, str)
+            ][:8],
+        })
+    return out
+
 
 def _build_payload(project: Optional[str], prompts: list[str], cap: int = 30) -> str:
     """Compact representation of the session for the model. Front-load the

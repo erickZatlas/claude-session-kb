@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -66,6 +67,63 @@ def _enrich():
     enricher.sync(store.sessions, store.records)
 
 
+# Phase E.B: background tool-call summarizer. Wakes every WORKER_INTERVAL_S
+# seconds, drains pending tool_calls in batches per session, asks DeepSeek
+# for 1–4 observations per batch, marks the batch processed.
+_worker_stop = threading.Event()
+_worker_lock = threading.Lock()
+_worker_state = {"running": False, "sessions_done": 0, "obs_written": 0,
+                 "batches_processed": 0, "failed": 0, "last_tick_at": None}
+WORKER_INTERVAL_S = int(os.environ.get("SESSION_KB_WORKER_INTERVAL_S", "60"))
+WORKER_MIN_AGE_S = int(os.environ.get("SESSION_KB_WORKER_MIN_AGE_S", "300"))
+WORKER_BATCH = int(os.environ.get("SESSION_KB_WORKER_BATCH", "50"))
+
+
+def _tool_summarizer_tick():
+    """One pass of the worker. Returns count of observations written this tick.
+    Factored out so tests can drive a single iteration synchronously."""
+    written = 0
+    if not _worker_lock.acquire(blocking=False):
+        return 0
+    try:
+        sids = capture.sessions_with_pending_tools(
+            min_age_s=WORKER_MIN_AGE_S, max_sessions=20,
+        )
+        for sid in sids:
+            sess = capture.get_session(sid) or {"id": sid}
+            batch = capture.pop_pending_tools(sid, limit=WORKER_BATCH)
+            if not batch:
+                continue
+            try:
+                obs = observe.generate_tool_observations(sess, batch)
+            except Exception:
+                obs = []
+                _worker_state["failed"] += 1
+            if obs:
+                capture.append_observations(sid, obs)
+                written += len(obs)
+            capture.mark_tools_processed([b["id"] for b in batch])
+            _worker_state["batches_processed"] += 1
+            _worker_state["sessions_done"] += 1
+        _worker_state["obs_written"] += written
+        _worker_state["last_tick_at"] = int(time.time())
+    finally:
+        _worker_lock.release()
+    return written
+
+
+def _tool_summarizer_loop():
+    _worker_state["running"] = True
+    try:
+        while not _worker_stop.wait(WORKER_INTERVAL_S):
+            try:
+                _tool_summarizer_tick()
+            except Exception:
+                _worker_state["failed"] += 1
+    finally:
+        _worker_state["running"] = False
+
+
 def _refresh_and_kick() -> bool:
     """Reload the store if our DB grew; if it did, kick background indexing and
     LLM enrichment for whatever new records arrived. Every read endpoint should
@@ -91,7 +149,11 @@ async def lifespan(_app):
     threading.Thread(target=_index, args=(store.records,), daemon=True).start()
     # LLM enrichment runs alongside; degrades to TF-IDF if DEEPSEEK_API_KEY is missing.
     threading.Thread(target=_enrich, daemon=True).start()
+    # Phase E.B: tool-call summarizer drains the queue every WORKER_INTERVAL_S
+    _worker_stop.clear()
+    threading.Thread(target=_tool_summarizer_loop, daemon=True).start()
     yield
+    _worker_stop.set()
 
 
 app = FastAPI(title="Claude Knowledge Base", lifespan=lifespan)
@@ -298,6 +360,34 @@ def api_capture_tool(body: _CaptureTool):
         cwd=body.cwd,
     )
     return {"ok": True, "id": tc_id}
+
+
+@app.get("/api/worker/status")
+def api_worker_status():
+    """Visibility into the tool-call summarizer loop."""
+    return {
+        **_worker_state,
+        "interval_s": WORKER_INTERVAL_S,
+        "min_age_s": WORKER_MIN_AGE_S,
+        "batch": WORKER_BATCH,
+    }
+
+
+@app.post("/api/worker/tick")
+def api_worker_tick(min_age_s: int | None = None):
+    """Drive one summarizer pass synchronously. Useful for tests / when the
+    user wants their session's tool calls summarized RIGHT NOW instead of
+    waiting for the next 60s tick. Returns the number of observations written.
+    `min_age_s=0` ignores the 'wait 5 min before summarizing a session' guard."""
+    global WORKER_MIN_AGE_S
+    saved = WORKER_MIN_AGE_S
+    if min_age_s is not None:
+        WORKER_MIN_AGE_S = max(0, int(min_age_s))
+    try:
+        written = _tool_summarizer_tick()
+    finally:
+        WORKER_MIN_AGE_S = saved
+    return {"ok": True, "observations_written": written, **_worker_state}
 
 
 @app.get("/api/capture/stats")
