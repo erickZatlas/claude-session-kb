@@ -22,6 +22,61 @@ import urllib.request
 KB_BASE = "http://127.0.0.1:8000/api"
 TIMEOUT_S = 1.5
 
+# Cheap path-shape detector for Bash output where we don't know argv structure.
+_BASH_PATH_RE = re.compile(
+    r"[A-Za-z0-9_./~-]+\.(?:py|ts|tsx|js|jsx|kt|java|kts|md|sql|json|yaml|yml|sh|bash|html|css|toml|ini|cfg|xml|gradle|rs|go|rb)"
+)
+# Truncation budgets — keep PostToolUse cheap while still preserving signal.
+_TRUNC_INPUT = 2048
+_TRUNC_RESPONSE_EACH_END = 500
+
+
+def _truncate(s, n):
+    if s is None:
+        return None
+    s = str(s)
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _head_tail(s, each):
+    if s is None:
+        return None
+    s = str(s)
+    if len(s) <= each * 2 + 16:
+        return s
+    return s[:each] + "\n…[truncated]…\n" + s[-each:]
+
+
+def _files_from_tool(tool_name, tool_input):
+    """Tiny per-tool dispatcher: pull paths out of the tool_input dict.
+    Returns (files, kind) where kind ∈ {"read", "edited", "mentioned"}."""
+    if not isinstance(tool_input, dict):
+        return [], "mentioned"
+    name = (tool_name or "").strip()
+    if name in ("Read", "NotebookEdit"):
+        fp = tool_input.get("file_path") or tool_input.get("notebook_path")
+        return ([fp], "read") if fp else ([], "read")
+    if name in ("Edit", "Write"):
+        fp = tool_input.get("file_path")
+        return ([fp], "edited") if fp else ([], "edited")
+    if name == "MultiEdit":
+        files = [tool_input.get("file_path")] if tool_input.get("file_path") else []
+        # MultiEdit also has edits[] with potentially distinct files in newer schemas
+        for e in (tool_input.get("edits") or []):
+            fp = e.get("file_path") if isinstance(e, dict) else None
+            if fp and fp not in files:
+                files.append(fp)
+        return (files, "edited")
+    if name in ("Grep", "Glob"):
+        p = tool_input.get("path")
+        return ([p], "mentioned") if isinstance(p, str) and p.startswith("/") else ([], "mentioned")
+    if name == "Bash":
+        cmd = tool_input.get("command") or ""
+        paths = list(dict.fromkeys(_BASH_PATH_RE.findall(cmd)))[:8]
+        return (paths, "mentioned")
+    # MCP and everything else: no files extracted by default.
+    return [], "mentioned"
+
 # Convention: worktrees live at <repo>/.claude/worktrees/<branch-or-ticket>/...
 # (see ~/.claude/rules/common/patterns.md). Without this normalisation a session
 # started inside a worktree would be recorded with project=<worktree-name>,
@@ -90,6 +145,29 @@ def main() -> None:
                 "cwd": cwd,
                 "ts": now_ms,
             })
+    elif event == "PostToolUse":
+        # Phase E: capture every tool call into the queue. The background
+        # summarizer will roll batches into observations. Hook stays cheap —
+        # one POST, payload truncated.
+        tool_name = inp.get("tool_name") or ""
+        tool_input = inp.get("tool_input") or {}
+        tool_response = inp.get("tool_response")
+        files, kind = _files_from_tool(tool_name, tool_input)
+        try:
+            input_json = json.dumps(tool_input, ensure_ascii=False)
+        except (TypeError, ValueError):
+            input_json = str(tool_input)
+        _post("capture/tool", {
+            "session_id": session_id,
+            "ts": now_ms,
+            "tool_name": tool_name,
+            "tool_input": _truncate(input_json, _TRUNC_INPUT),
+            "tool_response": _head_tail(tool_response, _TRUNC_RESPONSE_EACH_END),
+            "files": files,
+            "kind": kind,
+            "project": project,
+            "cwd": cwd,
+        })
     elif event == "Stop":
         _post("capture/end", {"session_id": session_id, "ts": now_ms})
         # Phase C: on session end, kick off observation generation. The endpoint

@@ -61,6 +61,54 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS idx_observations_session ON observations(session_id, ord);
 CREATE INDEX IF NOT EXISTS idx_observations_type    ON observations(type);
+
+-- Phase E (tool-call capture): one row per PostToolUse event from Claude Code,
+-- queued for the background summarizer to roll up into observations.
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id    TEXT NOT NULL,
+  ts            INTEGER NOT NULL,
+  tool_name     TEXT NOT NULL,
+  tool_input    TEXT,                            -- truncated JSON
+  tool_response TEXT,                            -- truncated head+tail
+  files         TEXT NOT NULL DEFAULT '[]',      -- JSON array of touched paths
+  status        TEXT NOT NULL DEFAULT 'pending', -- pending|processed|failed
+  processed_at  INTEGER,
+  observation_id INTEGER,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session_ts ON tool_calls(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_status     ON tool_calls(status);
+
+-- Files-touched index, populated alongside tool_calls. Lets recall boost
+-- sessions that touched the file the user is asking about right now.
+CREATE TABLE IF NOT EXISTS session_files (
+  session_id  TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  kind        TEXT NOT NULL,                    -- read|edited|mentioned
+  first_seen  INTEGER NOT NULL,
+  last_seen   INTEGER NOT NULL,
+  count       INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (session_id, path, kind),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_files_path ON session_files(path);
+
+-- Phase D (cross-session lessons): distilled patterns that recur across many
+-- observations. Populated by /api/lessons/distill.
+CREATE TABLE IF NOT EXISTS lessons (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  title              TEXT NOT NULL,
+  text               TEXT NOT NULL,
+  tags               TEXT NOT NULL DEFAULT '[]',  -- JSON array
+  source_session_ids TEXT NOT NULL DEFAULT '[]',  -- JSON array of session UUIDs
+  evidence_count     INTEGER NOT NULL DEFAULT 0,
+  first_seen         INTEGER NOT NULL,
+  last_seen          INTEGER NOT NULL,
+  superseded_by      INTEGER,
+  created_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lessons_last_seen ON lessons(last_seen DESC);
 """
 
 # Lightweight migrations — old DBs with the original schema get the new columns added.
@@ -266,3 +314,251 @@ class CaptureStore:
                     "UPDATE sessions SET prompt_count = ? WHERE id = ?",
                     (len(prompts), session_id),
                 )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase E: tool-call capture + file index. PostToolUse hook calls
+    # record_tool_call(); the background summarizer drains pending rows via
+    # sessions_with_pending_tools + pop_pending_tools + mark_tools_processed.
+    # ─────────────────────────────────────────────────────────────────────────
+    def record_tool_call(self, session_id: str, ts: int, tool_name: str,
+                         tool_input: Optional[str], tool_response: Optional[str],
+                         files: list[str], kind: str = "read",
+                         project: Optional[str] = None, cwd: Optional[str] = None) -> int:
+        """Append a tool-call row and upsert session_files for each path.
+        Creates the session shell if missing (PostToolUse can fire before any
+        UserPromptSubmit hook registered the session — same defensive insert
+        as record_prompt). Returns the new tool_calls row id."""
+        with self._lock, self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO sessions (id, project, cwd, started_at, status) "
+                "VALUES (?, ?, ?, ?, 'active')",
+                (session_id, project, cwd, ts),
+            )
+            cur = c.execute(
+                "INSERT INTO tool_calls "
+                "  (session_id, ts, tool_name, tool_input, tool_response, files, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                (session_id, ts, tool_name, tool_input, tool_response,
+                 json.dumps(list(files or [])[:32])),
+            )
+            tc_id = cur.lastrowid
+            for f in (files or []):
+                if not f or len(f) > 500:
+                    continue
+                c.execute(
+                    "INSERT INTO session_files (session_id, path, kind, first_seen, last_seen, count) "
+                    "VALUES (?, ?, ?, ?, ?, 1) "
+                    "ON CONFLICT(session_id, path, kind) DO UPDATE SET "
+                    "  last_seen = excluded.last_seen, "
+                    "  count = session_files.count + 1",
+                    (session_id, f, kind, ts, ts),
+                )
+            return tc_id
+
+    def sessions_with_pending_tools(self, min_age_s: int = 300,
+                                    max_sessions: int = 20) -> list[str]:
+        """Session ids whose oldest pending tool-call has aged past min_age_s
+        (so we batch by session and don't summarize mid-burst). Returned in
+        order of oldest-pending-first so long-idle sessions drain first."""
+        cutoff = int(time.time() * 1000) - min_age_s * 1000
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT session_id, MIN(ts) AS oldest "
+                "FROM tool_calls WHERE status = 'pending' "
+                "GROUP BY session_id HAVING oldest <= ? "
+                "ORDER BY oldest ASC LIMIT ?",
+                (cutoff, max_sessions),
+            ).fetchall()
+        return [r["session_id"] for r in rows]
+
+    def pop_pending_tools(self, session_id: str, limit: int = 50) -> list[dict]:
+        """Return up to `limit` pending tool-call rows for this session,
+        oldest-first. Caller marks them processed once the summarizer is done
+        (atomicity isn't critical — duplicate processing would just produce
+        duplicate observations on retry, and we dedupe by content via the
+        existing replace_observations path)."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT id, ts, tool_name, tool_input, tool_response, files "
+                "FROM tool_calls WHERE session_id = ? AND status = 'pending' "
+                "ORDER BY ts ASC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["files"] = json.loads(d["files"] or "[]")
+            except json.JSONDecodeError:
+                d["files"] = []
+            out.append(d)
+        return out
+
+    def mark_tools_processed(self, ids: list[int], observation_id: Optional[int] = None) -> int:
+        if not ids:
+            return 0
+        now = int(time.time() * 1000)
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock, self._conn() as c:
+            c.execute(
+                f"UPDATE tool_calls "
+                f"SET status = 'processed', processed_at = ?, observation_id = ? "
+                f"WHERE id IN ({placeholders})",
+                (now, observation_id, *ids),
+            )
+            return len(ids)
+
+    def files_for_session(self, session_id: str, limit: int = 50) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT path, kind, count, last_seen FROM session_files "
+                "WHERE session_id = ? ORDER BY count DESC, last_seen DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def sessions_for_file(self, path: str, limit: int = 20) -> list[dict]:
+        """Sessions that touched `path`, most-recent-first. Used by the
+        file-aware recall boost AND the by-file MCP tool."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT sf.session_id, sf.kind, sf.count, sf.last_seen, "
+                "       s.project, s.label, s.summary "
+                "FROM session_files sf LEFT JOIN sessions s ON s.id = sf.session_id "
+                "WHERE sf.path = ? OR sf.path LIKE ? "
+                "ORDER BY sf.last_seen DESC LIMIT ?",
+                (path, f"%/{path}", limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def session_file_overlap(self, session_id: str, paths: list[str]) -> int:
+        """How many of `paths` this session has in session_files. Lookup is
+        bounded by the size of `paths` (small; the recall handler extracts
+        only a few file-shaped tokens from the query). Suffix-match the
+        same way sessions_for_file does so a bare basename matches a full path."""
+        if not paths:
+            return 0
+        clauses = " OR ".join(["sf.path = ? OR sf.path LIKE ?"] * len(paths))
+        args: list = [session_id]
+        for p in paths:
+            args.extend([p, f"%/{p}"])
+        with self._conn() as c:
+            row = c.execute(
+                f"SELECT COUNT(DISTINCT sf.path) AS n FROM session_files sf "
+                f"WHERE sf.session_id = ? AND ({clauses})",
+                args,
+            ).fetchone()
+        return int(row["n"] or 0)
+
+    def session_file_counts(self) -> dict[str, int]:
+        """Map of session_id -> distinct files touched, for the card chip."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT session_id, COUNT(DISTINCT path) AS n "
+                "FROM session_files GROUP BY session_id"
+            ).fetchall()
+        return {r["session_id"]: int(r["n"]) for r in rows}
+
+    def append_observations(self, session_id: str, observations: list[dict]) -> int:
+        """Append observations to a session WITHOUT wiping existing ones.
+        Used by the background tool-call summarizer (the per-prompt /api/observe
+        path still uses replace_observations for idempotent regeneration)."""
+        if not observations:
+            return 0
+        now = int(time.time() * 1000)
+        with self._lock, self._conn() as c:
+            base = c.execute(
+                "SELECT COALESCE(MAX(ord), -1) + 1 FROM observations WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            for i, o in enumerate(observations):
+                c.execute(
+                    "INSERT INTO observations (session_id, ord, type, title, text, tags, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id, base + i,
+                        (o.get("type") or "discovery").lower(),
+                        (o.get("title") or "").strip()[:200],
+                        (o.get("text") or "").strip(),
+                        json.dumps(list(o.get("tags") or [])[:8]),
+                        now,
+                    ),
+                )
+            return len(observations)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phase D: cross-session lessons rollup.
+    # ─────────────────────────────────────────────────────────────────────────
+    def replace_lessons(self, lessons: list[dict]) -> int:
+        """Replace the entire lessons table contents. /api/lessons/distill is
+        idempotent — running it again with the same observation corpus yields
+        the same (LLM-cached) lessons, so a wipe-and-rewrite is the simplest
+        consistent strategy."""
+        now = int(time.time() * 1000)
+        with self._lock, self._conn() as c:
+            c.execute("DELETE FROM lessons")
+            for L in lessons:
+                sids = list(L.get("source_session_ids") or [])
+                c.execute(
+                    "INSERT INTO lessons "
+                    "  (title, text, tags, source_session_ids, evidence_count, "
+                    "   first_seen, last_seen, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        (L.get("title") or "").strip()[:200],
+                        (L.get("text") or "").strip(),
+                        json.dumps(list(L.get("tags") or [])[:8]),
+                        json.dumps(sids[:32]),
+                        int(L.get("evidence_count") or len(sids)),
+                        int(L.get("first_seen") or now),
+                        int(L.get("last_seen") or now),
+                        now,
+                    ),
+                )
+            return len(lessons)
+
+    def list_lessons(self, tag: Optional[str] = None, limit: int = 50) -> list[dict]:
+        with self._conn() as c:
+            if tag:
+                rows = c.execute(
+                    "SELECT * FROM lessons "
+                    "WHERE tags LIKE ? "
+                    "ORDER BY last_seen DESC LIMIT ?",
+                    (f'%"{tag}"%', limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM lessons ORDER BY last_seen DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("tags", "source_session_ids"):
+                try:
+                    d[k] = json.loads(d[k] or "[]")
+                except json.JSONDecodeError:
+                    d[k] = []
+            out.append(d)
+        return out
+
+    def observations_since(self, since_ms: int, limit: int = 5000) -> list[dict]:
+        """Window of observations for the lessons distiller."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT o.session_id, o.title, o.text, o.tags, o.type, o.created_at, "
+                "       s.project, s.label "
+                "FROM observations o LEFT JOIN sessions s ON s.id = o.session_id "
+                "WHERE o.created_at >= ? "
+                "ORDER BY o.created_at DESC LIMIT ?",
+                (since_ms, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["tags"] = json.loads(d["tags"] or "[]")
+            except json.JSONDecodeError:
+                d["tags"] = []
+            out.append(d)
+        return out

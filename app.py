@@ -249,6 +249,18 @@ class _CaptureEnd(BaseModel):
     ts: int | None = None
 
 
+class _CaptureTool(BaseModel):
+    session_id: str
+    ts: int
+    tool_name: str
+    tool_input: str | None = None
+    tool_response: str | None = None
+    files: list[str] = []
+    kind: str = "mentioned"
+    project: str | None = None
+    cwd: str | None = None
+
+
 @app.post("/api/capture/start")
 def api_capture_start(body: _CaptureStart):
     capture.session_start(body.session_id, body.project, body.cwd, body.started_at)
@@ -268,6 +280,24 @@ def api_capture_prompt(body: _CapturePrompt):
 def api_capture_end(body: _CaptureEnd):
     capture.session_end(body.session_id, body.ts)
     return {"ok": True}
+
+
+@app.post("/api/capture/tool")
+def api_capture_tool(body: _CaptureTool):
+    """Phase E: one row per PostToolUse event. The background summarizer
+    (started in the lifespan) drains pending rows in batches."""
+    tc_id = capture.record_tool_call(
+        session_id=body.session_id,
+        ts=body.ts,
+        tool_name=body.tool_name,
+        tool_input=body.tool_input,
+        tool_response=body.tool_response,
+        files=body.files or [],
+        kind=body.kind or "mentioned",
+        project=body.project,
+        cwd=body.cwd,
+    )
+    return {"ok": True, "id": tc_id}
 
 
 @app.get("/api/capture/stats")
