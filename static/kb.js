@@ -111,10 +111,76 @@
     return toks[0].slice(0, 20);
   }
 
-  // Single-word label for an observation/summary record — defers to a server-provided
-  // r.label if present, otherwise picks a distinctive token from the title.
-  const recordLabel = (r) =>
-    r.label || topToken(r.title) || truncate(r.title, 14);
+  // Convert any string to a kebab label, trimmed to ~22 chars at a word
+  // boundary (so "verification-of-pms-config" doesn't get cut mid-word).
+  function toKebab(text) {
+    if (!text) return null;
+    const s = String(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (!s) return null;
+    if (s.length <= 22) return s;
+    // round down to the last hyphen that keeps us under 22 chars
+    let out = s.slice(0, 22);
+    const lastHy = out.lastIndexOf("-");
+    if (lastHy > 8) out = out.slice(0, lastHy);
+    return out;
+  }
+
+  // Multi-token kebab label for an observation node — what the drill-down
+  // graph shows under each circle. Priority order:
+  //   1. server-provided r.label (rare; reserved for future)
+  //   2. the first 2 topical tags from r.concepts (our Phase C/D tags), joined
+  //   3. 2 distinctive tokens from r.title, joined
+  //   4. truncated title as a last resort
+  // The 2-tag join is the new path that this user noticed was missing — single
+  // English words like "Reservation" / "Confirmed" carried no information when
+  // every node in a session is about reservations.
+  function topTokens(text, n) {
+    if (!text) return [];
+    const toks = (text.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || []).filter(
+      (t) => !STOP.has(t.toLowerCase()) && !/^\d+$/.test(t),
+    );
+    if (!toks.length) return [];
+    const score = (t) =>
+      t.length +
+      (/^[A-Z][A-Z0-9_]+$/.test(t) ? 12 : 0) +
+      (/^[A-Z]/.test(t) ? 3 : 0);
+    // Sort by score desc, dedupe case-insensitively, return up to n
+    toks.sort((a, b) => score(b) - score(a));
+    const seen = new Set();
+    const out = [];
+    for (const t of toks) {
+      const k = t.toLowerCase();
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(t);
+      if (out.length >= n) break;
+    }
+    return out;
+  }
+
+  const recordLabel = (r) => {
+    if (r.label) return r.label;
+    // Use our Phase C/D topical tags first — they're already domain-specific
+    // (file names, identifiers, kebab concepts) and avoid the "every node says
+    // Reservation" problem.
+    if (r.concepts && r.concepts.length) {
+      const picks = r.concepts.slice(0, 2).map(String).join(" ");
+      const kebab = toKebab(picks);
+      if (kebab && kebab.includes("-")) return kebab;
+      // single-tag case (e.g. tag was already a multi-word kebab like
+      // "stripe-paraty-acceptance") — keep it as-is via toKebab normalization
+      const single = toKebab(r.concepts[0]);
+      if (single) return single;
+    }
+    // Fall back to 2 distinctive tokens from the title
+    const tokens = topTokens(r.title, 2);
+    if (tokens.length >= 2) return toKebab(tokens.join(" "));
+    if (tokens.length === 1) return toKebab(tokens[0]);
+    return truncate(r.title || "(untitled)", 22);
+  };
 
   async function api(path) {
     const r = await fetch(path);
