@@ -563,6 +563,11 @@
     );
     const row = el("div", "row");
     row.appendChild(el("span", "cchip", s.project || ""));
+    if (s.worktree) {
+      const wt = el("span", "cchip card-chip-worktree", "wt: " + s.worktree);
+      wt.title = "git worktree directory";
+      row.appendChild(wt);
+    }
     if (s.obsCount != null)
       row.appendChild(el("span", "cchip", s.obsCount + " observations"));
     if (s.started)
@@ -757,6 +762,15 @@
         meta.appendChild(
           el("span", "card-chip card-chip-strong", s.project || ""),
         );
+        if (s.worktree) {
+          const wt = el(
+            "span",
+            "card-chip card-chip-worktree",
+            "wt: " + s.worktree,
+          );
+          wt.title = "git worktree directory";
+          meta.appendChild(wt);
+        }
         if (s.obsCount != null)
           meta.appendChild(el("span", "card-chip", s.obsCount + " obs"));
         if (s.started)

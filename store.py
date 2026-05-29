@@ -17,6 +17,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -25,6 +26,19 @@ from dataclasses import dataclass, field
 import llm
 
 DB_PATH = os.path.expanduser("~/.claude-kb/data.db")
+
+# Worktree convention: <repo>/.claude/worktrees/<branch-or-ticket>/...
+# (capture.py rewrites `project` to the parent repo at write time; this regex
+# pulls the worktree NAME back out of cwd so the UI can label it.)
+_WORKTREE_RE = re.compile(r"/\.claude/worktrees/([^/]+)")
+
+
+def _worktree_from_cwd(cwd):
+    """Return the worktree directory name when cwd points inside one, else None."""
+    if not cwd:
+        return None
+    m = _WORKTREE_RE.search(cwd)
+    return m.group(1) if m else None
 
 
 def _connect_ro(db_path: str) -> sqlite3.Connection:
@@ -233,6 +247,8 @@ class Store:
                 "started": started_iso, "status": r["status"] or "completed",
                 "obsCount": 0,                            # filled by reload()
                 "label": r["label"], "summary": r["summary"],
+                "cwd": r["cwd"],
+                "worktree": _worktree_from_cwd(r["cwd"]),
             })
         return out
 

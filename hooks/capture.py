@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -20,6 +21,22 @@ import urllib.request
 
 KB_BASE = "http://127.0.0.1:8000/api"
 TIMEOUT_S = 1.5
+
+# Convention: worktrees live at <repo>/.claude/worktrees/<branch-or-ticket>/...
+# (see ~/.claude/rules/common/patterns.md). Without this normalisation a session
+# started inside a worktree would be recorded with project=<worktree-name>,
+# producing dozens of bogus "projects" in the KB dropdown.
+_WORKTREE_RE = re.compile(r"^(.*?)/\.claude/worktrees/[^/]+(?:/|$)")
+
+
+def _project_from_cwd(cwd):
+    """Return the parent repo's basename. For a worktree path, strip the
+    `.claude/worktrees/<name>/...` tail first. For a normal path, just
+    `os.path.basename(cwd)`."""
+    if not cwd:
+        return None
+    m = _WORKTREE_RE.match(cwd)
+    return os.path.basename(m.group(1) if m else cwd)
 
 
 def _post(path: str, payload: dict | None = None) -> None:
@@ -54,7 +71,7 @@ def main() -> None:
 
     now_ms = int(time.time() * 1000)
     cwd = inp.get("cwd")
-    project = os.path.basename(cwd) if cwd else None
+    project = _project_from_cwd(cwd)
 
     if event == "SessionStart":
         _post("capture/start", {
