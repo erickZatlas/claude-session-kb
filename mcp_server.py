@@ -119,6 +119,59 @@ async def list_tools() -> list[t.Tool]:
                 "required": ["session_id"],
             },
         ),
+        t.Tool(
+            name="find_sessions_by_file",
+            description=(
+                "Find past sessions that touched a specific file (read or "
+                "edited it via PostToolUse capture). Use when the user is "
+                "about to work on file X and you want to ground in prior "
+                "work on the same file. Accepts an absolute path OR a "
+                "bare basename (matches via suffix)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Full path or basename, e.g. 'app.py' or '/home/erick/dev/claude-kb/app.py'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max sessions to return (default 10).",
+                        "default": 10,
+                        "minimum": 1,
+                        "maximum": 50,
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
+        t.Tool(
+            name="list_lessons",
+            description=(
+                "Cross-session 'lessons' distilled by /api/lessons/distill — "
+                "durable facts that recur across many sessions (project "
+                "conventions, architectural facts, recurring bug patterns). "
+                "Use when grounding a task in long-standing project knowledge "
+                "rather than one specific past session."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter by a domain tag (e.g. 'OXI', 'BEM', 'kebab-labels'). Omit for all.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max lessons to return (default 20).",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -194,6 +247,53 @@ async def call_tool(name: str, arguments: dict) -> list[t.TextContent]:
         except RuntimeError as e:
             return [t.TextContent(type="text", text=f"error: {e}")]
         return [t.TextContent(type="text", text=_fmt_session(data))]
+
+    if name == "find_sessions_by_file":
+        path = (arguments.get("path") or "").strip()
+        if not path:
+            return [t.TextContent(type="text", text="error: 'path' is required")]
+        try:
+            data = _http_get("/api/sessions/by-file", {
+                "path": path,
+                "limit": int(arguments.get("limit") or 10),
+            })
+        except RuntimeError as e:
+            return [t.TextContent(type="text", text=f"error: {e}")]
+        rows = data.get("sessions") or []
+        if not rows:
+            return [t.TextContent(type="text", text=f"No sessions touched {path}.")]
+        lines = [f"{len(rows)} session(s) touched {path}:"]
+        for r in rows:
+            lines.append(
+                f"\n- {r.get('label') or '(no label)'}  ·  {r.get('project') or '?'}"
+                f"  ·  {r.get('kind')}  ·  count {r.get('count')}\n"
+                f"  session_id: {r.get('session_id')}"
+            )
+        lines.append("\n--- raw json ---\n" + json.dumps(rows, ensure_ascii=False))
+        return [t.TextContent(type="text", text="\n".join(lines))]
+
+    if name == "list_lessons":
+        params: dict = {"limit": int(arguments.get("limit") or 20)}
+        if arguments.get("tag"):
+            params["tag"] = arguments["tag"]
+        try:
+            data = _http_get("/api/lessons", params)
+        except RuntimeError as e:
+            return [t.TextContent(type="text", text=f"error: {e}")]
+        rows = data.get("lessons") or []
+        if not rows:
+            hint = " (run `POST /api/lessons/distill` to populate)" if not arguments.get("tag") else ""
+            return [t.TextContent(type="text", text=f"No lessons found{hint}.")]
+        lines = [f"{len(rows)} lesson(s):"]
+        for L in rows:
+            tags = ", ".join(L.get("tags") or []) or "(none)"
+            sids = (L.get("source_session_ids") or [])[:3]
+            lines.append(
+                f"\n- {L.get('title')}\n  {L.get('text')}\n  tags: {tags}\n"
+                f"  evidence: {L.get('evidence_count')} sessions, e.g. {sids}"
+            )
+        lines.append("\n--- raw json ---\n" + json.dumps(rows, ensure_ascii=False))
+        return [t.TextContent(type="text", text="\n".join(lines))]
 
     return [t.TextContent(type="text", text=f"error: unknown tool '{name}'")]
 

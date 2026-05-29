@@ -224,6 +224,46 @@ def api_sessions(project: str = "all"):
     return {"sessions": s}
 
 
+# Phase E.C: ranking helpers for the recall hook.
+# Half-life is configurable so heavy users can tighten it (e.g., 14 days) and
+# casual users can loosen it (e.g., 60 days). Set to 99999 to effectively
+# disable the decay.
+HALFLIFE_DAYS = float(os.environ.get("SESSION_KB_HALFLIFE_DAYS", "30"))
+# Max boost any single session can get from file overlap, additive on top of
+# the (decayed) cosine score. Keeps semantic match dominant.
+FILE_BOOST_CAP = float(os.environ.get("SESSION_KB_FILE_BOOST_CAP", "0.25"))
+FILE_BOOST_PER_PATH = float(os.environ.get("SESSION_KB_FILE_BOOST_PER_PATH", "0.10"))
+
+# Same regex shape as the Bash file extractor in hooks/capture.py — used to
+# pull file-shaped tokens from the user's prompt at recall time.
+_QUERY_FILE_RE = __import__("re").compile(
+    r"[A-Za-z0-9_./~-]+\.(?:py|ts|tsx|js|jsx|kt|java|kts|md|sql|json|yaml|yml|sh|bash|html|css|toml|ini|cfg|xml|gradle|rs|go|rb)"
+)
+
+
+def _decay(epoch_ms, halflife_days=HALFLIFE_DAYS):
+    """Returns a multiplier in (0, 1]. Older = smaller. Anything from the
+    future or right now is 1.0."""
+    if not epoch_ms or halflife_days >= 99999:
+        return 1.0
+    age_days = (time.time() * 1000 - float(epoch_ms)) / (1000 * 86400)
+    if age_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / halflife_days)
+
+
+def _extract_query_files(q):
+    """Pull file-shaped tokens out of a prompt. Dedupes case-insensitively."""
+    seen = set()
+    out = []
+    for m in _QUERY_FILE_RE.findall(q or ""):
+        k = m.lower()
+        if k not in seen:
+            seen.add(k)
+            out.append(m)
+    return out[:8]
+
+
 @app.get("/api/recall")
 def api_recall(
     q: str = "",
@@ -232,27 +272,33 @@ def api_recall(
     exclude: str = "",
     min_score: float = 0.30,
 ):
-    """Pre-emptive recall: given a query, return the top-N most semantically similar
-    past sessions. Used by the UserPromptSubmit hook to surface related work to Claude
-    before it sees the user's prompt.
+    """Pre-emptive recall with three ranking signals:
+      1. Cosine similarity over MiniLM embeddings (the primary signal)
+      2. Time decay (half-life HALFLIFE_DAYS) so 6-month-old sessions don't
+         outrank last-week's at the same cosine
+      3. File-overlap boost (+0.10 per path, cap +0.25) when the query
+         mentions files this session touched per session_files
 
-    Algorithm: embed the query, cosine-score against every record vector, dedupe by
-    session (a session's score = its best matching record's score), drop anything
-    below min_score (configurable; default 0.30 keeps noise out)."""
+    Final session score = max over its records of (cosine * decay) + file_boost.
+    """
     _refresh_and_kick()
     q = (q or "").strip()
     if not q or embedder.matrix.size == 0:
         return {"sessions": [], "indexing": _state["indexing"]}
     qv = embedder.embed_query(q)
     sims = embedder.matrix @ qv  # one cosine per indexed record
-    # over-fetch a generous multiple so dedupe-by-session has room
-    order = np.argsort(-sims)[: max(limit * 12, 24)]
-    seen: set[str] = set()
-    sessions = []
+    # Wider over-fetch than before — decay can demote top semantic matches
+    # if they're old, and boost can promote previously-below-threshold ones.
+    order = np.argsort(-sims)[: max(limit * 30, 60)]
+    query_files = _extract_query_files(q)
+
+    # Walk in raw-cosine order, compute the final score per record, dedupe by
+    # session keeping that session's best record. Can no longer break early
+    # when raw cosine dips below min_score (boost can lift it back), so we
+    # filter after the loop.
+    best_per_session: dict[str, tuple[float, dict]] = {}
     for i in order:
-        score = float(sims[i])
-        if score < min_score:
-            break  # sims are sorted desc; everything after is worse
+        raw = float(sims[i])
         rec_id = embedder.ids[int(i)]
         r = store.rec_by_id.get(rec_id)
         if not r:
@@ -260,9 +306,29 @@ def api_recall(
         if project != "all" and r.get("project") != project:
             continue
         sid = r.get("sessionId")
-        if not sid or sid == exclude or sid in seen:
+        if not sid or sid == exclude:
             continue
-        seen.add(sid)
+        # Per-record signal (decayed cosine), then add the session-level boost
+        cosine_decayed = raw * _decay(r.get("epoch"))
+        boost = 0.0
+        if query_files:
+            try:
+                overlap = capture.session_file_overlap(sid, query_files)
+            except Exception:
+                overlap = 0
+            if overlap:
+                boost = min(FILE_BOOST_CAP, FILE_BOOST_PER_PATH * overlap)
+        final = cosine_decayed + boost
+        if final < min_score:
+            continue
+        # Keep the session's best record for the response payload
+        cur = best_per_session.get(sid)
+        if cur is None or final > cur[0]:
+            best_per_session[sid] = (final, r)
+    # Sort by final score and dedupe-by-session is already done
+    ranked = sorted(best_per_session.items(), key=lambda kv: -kv[1][0])
+    sessions = []
+    for sid, (final, r) in ranked[:limit]:
         s = store.sess_by_id.get(sid)
         if not s:
             continue
@@ -274,11 +340,9 @@ def api_recall(
             "project": s.get("project"),
             "started": s.get("started"),
             "obsCount": s.get("obsCount", 0),
-            "score": round(score, 3),
+            "score": round(final, 3),
             "matchedTitle": (r.get("title") or "")[:160],
         })
-        if len(sessions) >= limit:
-            break
     return {"sessions": sessions, "indexing": _state["indexing"]}
 
 
@@ -629,6 +693,76 @@ def api_observe_backfill(limit: int = 200):
 @app.get("/api/observe/status")
 def api_observe_status():
     return dict(_observe_state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase E.D — cross-session lessons. /api/lessons/distill runs the LLM over
+# the observation corpus and replaces the lessons table; /api/lessons reads
+# them back. Triggered manually for now (no scheduled job).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_lessons_lock = threading.Lock()
+_lessons_state = {"running": False, "lessons_written": 0, "obs_scanned": 0,
+                  "last_distilled_at": None, "last_error": None}
+
+
+def _distill_worker(days: int):
+    if not _lessons_lock.acquire(blocking=False):
+        return
+    try:
+        _lessons_state.update(running=True, last_error=None)
+        since_ms = int(time.time() * 1000) - days * 86400 * 1000
+        obs = capture.observations_since(since_ms, limit=5000)
+        _lessons_state["obs_scanned"] = len(obs)
+        if not obs:
+            return
+        lessons = observe.distill_lessons(obs)
+        if lessons:
+            now = int(time.time() * 1000)
+            for L in lessons:
+                L["first_seen"] = since_ms
+                L["last_seen"] = now
+                L["evidence_count"] = len(L.get("source_session_ids") or [])
+            n = capture.replace_lessons(lessons)
+            _lessons_state["lessons_written"] = n
+        _lessons_state["last_distilled_at"] = int(time.time())
+    except Exception as e:
+        _lessons_state["last_error"] = f"{type(e).__name__}: {e}"
+    finally:
+        _lessons_state["running"] = False
+        _lessons_lock.release()
+
+
+@app.post("/api/lessons/distill")
+def api_lessons_distill(days: int = 30, sync: bool = False):
+    """Run the distiller over the last `days` of observations and rewrite the
+    lessons table. Pass sync=true to block until done (1 DeepSeek call, ~10s);
+    default fires-and-forgets in a background thread so the caller returns
+    instantly."""
+    if sync:
+        _distill_worker(days)
+        return {"ok": True, **_lessons_state}
+    threading.Thread(target=_distill_worker, args=(days,), daemon=True).start()
+    return {"started": True, "days": days}
+
+
+@app.get("/api/lessons")
+def api_lessons(tag: str | None = None, limit: int = 50):
+    return {"lessons": capture.list_lessons(tag=tag, limit=limit)}
+
+
+@app.get("/api/lessons/status")
+def api_lessons_status():
+    return dict(_lessons_state)
+
+
+@app.get("/api/sessions/by-file")
+def api_sessions_by_file(path: str, limit: int = 10):
+    """Sessions that touched a given file. Used by the file-aware MCP tool
+    and by the UI's file-chip drill-in."""
+    if not path:
+        raise HTTPException(400, "path is required")
+    return {"path": path, "sessions": capture.sessions_for_file(path, limit=limit)}
 
 
 @app.post("/api/legacy/import")

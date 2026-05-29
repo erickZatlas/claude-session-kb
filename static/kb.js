@@ -819,6 +819,11 @@
         }
         if (s.obsCount != null)
           meta.appendChild(el("span", "card-chip", s.obsCount + " obs"));
+        if (s.filesCount) {
+          const fc = el("span", "card-chip", "📁 " + s.filesCount);
+          fc.title = "files touched";
+          meta.appendChild(fc);
+        }
         if (s.started)
           meta.appendChild(el("span", "card-chip", relativeAgo(s.started)));
         card.appendChild(meta);

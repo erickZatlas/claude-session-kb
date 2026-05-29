@@ -226,9 +226,11 @@ class Store:
         """Map our sessions table -> the legacy session-dict shape.
         memId == id since we don't keep a separate memory-session id."""
         rows = con.execute(
-            "SELECT id, project, cwd, started_at, ended_at, status, "
-            "       first_prompt, prompt_count, label, summary "
-            "FROM sessions ORDER BY started_at DESC"
+            "SELECT s.id, s.project, s.cwd, s.started_at, s.ended_at, s.status, "
+            "       s.first_prompt, s.prompt_count, s.label, s.summary, "
+            "       (SELECT COUNT(DISTINCT path) FROM session_files sf "
+            "        WHERE sf.session_id = s.id) AS files_count "
+            "FROM sessions s ORDER BY s.started_at DESC"
         ).fetchall()
         out = []
         for r in rows:
@@ -249,6 +251,7 @@ class Store:
                 "label": r["label"], "summary": r["summary"],
                 "cwd": r["cwd"],
                 "worktree": _worktree_from_cwd(r["cwd"]),
+                "filesCount": int(r["files_count"] or 0),
             })
         return out
 
