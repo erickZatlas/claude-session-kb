@@ -529,28 +529,74 @@
       r.files.slice(0, 30).forEach((f) => d.appendChild(el("div", "fpath", f)));
     }
 
+    // Session footer block on a record-detail pane. When we're already drilled
+    // into this session, drop redundant chrome (label heading + "Focus this
+    // session in graph" button) — the user already knows which session this is.
     const sess = sessByContentId.get(r.sessionId);
+    const alreadyDrilled = r.sessionId && state.selectedSessId === r.sessionId;
     const box = el("div", "session-box");
     box.appendChild(el("div", "sub", "Session"));
-    if (sess) box.appendChild(el("div", "body", sess.title));
-    if (r.sessionId) {
-      box.appendChild(el("code", null, "claude --resume " + r.sessionId));
-      const btn = el("button", "btn", "Copy resume command");
-      btn.style.marginTop = "8px";
-      btn.addEventListener("click", () => {
-        copyText("claude --resume " + r.sessionId);
-        btn.textContent = "Copied!";
-        setTimeout(() => (btn.textContent = "Copy resume command"), 1200);
-      });
-      box.appendChild(btn);
-      const focus = el("button", "btn", "Focus this session in graph");
-      focus.style.marginTop = "8px";
-      focus.style.marginLeft = "6px";
-      focus.addEventListener("click", () => selectSession(r.sessionId));
-      box.appendChild(focus);
-    } else {
+    if (!r.sessionId) {
       box.appendChild(el("div", "body", "(no linked session)"));
+      d.appendChild(box);
+      return;
     }
+    if (sess && !alreadyDrilled) {
+      // Heading: kebab label (preferred) or truncated first prompt
+      const heading = el(
+        "div",
+        "session-heading",
+        sess.label || truncate(sess.title || "session", 60),
+      );
+      heading.style.fontWeight = "600";
+      heading.style.color = "var(--text)";
+      heading.style.marginBottom = "4px";
+      box.appendChild(heading);
+      // Chips: project + worktree (if any)
+      const chips = el("div", "row");
+      chips.style.marginBottom = "6px";
+      chips.appendChild(el("span", "cchip", sess.project || ""));
+      if (sess.worktree) {
+        const wt = el(
+          "span",
+          "cchip card-chip-worktree",
+          "wt: " + sess.worktree,
+        );
+        wt.title = "git worktree directory";
+        chips.appendChild(wt);
+      }
+      box.appendChild(chips);
+      // Summary, when present
+      if (sess.summary) {
+        const sum = el("div", "body", sess.summary);
+        sum.style.fontStyle = "italic";
+        sum.style.opacity = "0.85";
+        sum.style.marginBottom = "6px";
+        box.appendChild(sum);
+      }
+    }
+    // Resume command on its own line — readable, not running into the buttons
+    const codeRow = el("div");
+    codeRow.style.marginBottom = "8px";
+    codeRow.appendChild(el("code", null, "claude --resume " + r.sessionId));
+    box.appendChild(codeRow);
+    // Buttons. "Focus this session in graph" hidden when already drilled in
+    // (clicking it would be a no-op).
+    const actions = el("div", "row");
+    actions.style.gap = "6px";
+    const btn = el("button", "btn", "Copy resume command");
+    btn.addEventListener("click", () => {
+      copyText("claude --resume " + r.sessionId);
+      btn.textContent = "Copied!";
+      setTimeout(() => (btn.textContent = "Copy resume command"), 1200);
+    });
+    actions.appendChild(btn);
+    if (!alreadyDrilled) {
+      const focus = el("button", "btn", "Focus this session in graph");
+      focus.addEventListener("click", () => selectSession(r.sessionId));
+      actions.appendChild(focus);
+    }
+    box.appendChild(actions);
     d.appendChild(box);
   }
 
