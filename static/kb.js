@@ -422,9 +422,14 @@
   }
 
   // ===================== RESULTS =====================
+  // Drill-down records pane (one session's observations). The cards/labels
+  // are the same shape as the search-result card list, so the title needs to
+  // say what these are — otherwise it stays at "Sessions" from the last
+  // overview render and reads as if you're browsing sessions.
   function renderResults(recs) {
     const list = $("#results");
     list.innerHTML = "";
+    $("#pane-title-label").textContent = "Observations";
     $("#results-count").textContent = recs.length;
     if (!recs.length) {
       list.appendChild(
