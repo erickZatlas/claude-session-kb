@@ -354,11 +354,12 @@
 <thead><tr><th>Endpoint</th><th>What it returns</th></tr></thead>
 <tbody>
   <tr><td>GET /api/meta</td><td>counts, projects, indexing + enrichment status</td></tr>
+  <tr><td>GET /api/health</td><td>cheap liveness probe (no reload): indexed/records/loadedAt + which workers are alive</td></tr>
   <tr><td>GET /api/search</td><td>ranked records (keyword | semantic, with project/kind/session filters)</td></tr>
   <tr><td>GET /api/record/{id}</td><td>one record + its session</td></tr>
   <tr><td>GET /api/sessions</td><td>all sessions (with labels + summaries + worktree + filesCount when present)</td></tr>
   <tr><td>GET /api/sessions/by-file</td><td>sessions that touched a path (suffix-matched basename or full path)</td></tr>
-  <tr><td>GET /api/recall</td><td>semantic recall → <code>{sessions, lessons}</code>: sessions by <em>cosine &times; decay + file-overlap-boost</em>, plus a <code>lessons</code> array of top distilled lessons + auto-memory facts; same backend the UserPromptSubmit hook uses</td></tr>
+  <tr><td>GET /api/recall</td><td>semantic recall → <code>{sessions, lessons}</code>: sessions by <em>cosine &times; decay + file-boost + same-project boost</em> (<code>?boost_project=</code>), plus a gap-trimmed <code>lessons</code> array of top distilled lessons + auto-memory facts; same backend the UserPromptSubmit hook uses</td></tr>
   <tr><td>GET /api/graph</td><td>session-overview nodes + shared-tag links</td></tr>
   <tr><td>GET /api/observe/{sid}</td><td>read one session's observations + label + summary</td></tr>
   <tr><td>POST /api/observe/{sid}</td><td>(re-)generate observations (background by default; <code>?sync=true</code> blocks)</td></tr>
@@ -371,6 +372,7 @@
   <tr><td>GET /api/memory</td><td>list ingested auto-memory facts (optionally filter by <code>?type=</code> user|feedback|project|reference)</td></tr>
   <tr><td>POST /api/memory/sync</td><td>re-scan <code>~/.claude/projects/*/memory/*.md</code> now → ingest stats</td></tr>
   <tr><td>GET /api/memory/status</td><td>last-scan stats + watch-loop interval</td></tr>
+  <tr><td>POST /api/index/compact</td><td>drop orphaned embedding vectors now → <code>{removed, indexed}</code> (also auto-runs from the workers)</td></tr>
   <tr><td>GET /api/stream</td><td>SSE: <code>refresh</code> on data growth, <code>ping</code> with indexing/enrichment progress</td></tr>
 </tbody>
 </table>

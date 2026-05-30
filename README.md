@@ -16,8 +16,9 @@ hooks wired into Claude Code's lifecycle. No external memory plugin required.
   runs semantic search over your history and injects the top-3 matching
   sessions as `additionalContext`, so Claude sees "you've worked on this
   before" before it starts thinking. Ranks by `cosine · time-decay +
-  file-overlap-boost` — six-month-old work doesn't outrank last week's, and
-  sessions that touched the file you're asking about climb.
+  file-overlap-boost + same-project-boost` — six-month-old work doesn't outrank
+  last week's, sessions that touched the file you're asking about climb, and
+  work in your current project is gently preferred (a boost, not a filter).
 - **Session + tool-call capture** — `SessionStart` / `UserPromptSubmit` /
   **`PostToolUse`** / `Stop` hooks record everything: each session, each
   prompt, and every tool call (Read / Edit / Write / Bash / Grep / Glob /
@@ -60,6 +61,32 @@ First start embeds every observation with `all-MiniLM-L6-v2` (a few minutes
 on CPU, ~260s for 4,800 records). Cached to `.cache/`; subsequent starts
 only embed deltas. **Keyword search works immediately**; semantic recall
 switches on once indexing finishes.
+
+### Run as a service (recommended)
+
+`python app.py` under `nohup` dies on reboot and silently disables the recall
+hook. A systemd **user** unit keeps it alive:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/claude-session-kb.service ~/.config/systemd/user/
+# optional: echo 'DEEPSEEK_API_KEY=sk-...' > ~/.config/claude-kb.env
+systemctl --user daemon-reload
+systemctl --user enable --now claude-session-kb
+loginctl enable-linger "$USER"        # survive logout
+curl -s http://127.0.0.1:8000/api/health
+```
+
+### Tests
+
+```bash
+pip install -r requirements.txt       # includes pytest
+pytest -q                             # pure-logic unit tests (no model/network)
+```
+
+Covers recall ranking (decay, file/project boost, knowledge gap-trim), lessons
+merge, auto-memory frontmatter parsing + project resolution, tag extraction, and
+the store's record projection. Write-path tests use throwaway temp DBs.
 
 ## How it works
 
@@ -134,6 +161,11 @@ switches on once indexing finishes.
 - **No rebuild step.** `store.py` watches `data.db`'s `max(created_at)` and
   reloads only when it grows. Each capture or observe write triggers a
   reload on the next read.
+- **Self-compacting index.** `Embedder.sync` only appends, and content-hashed
+  memory/lesson ids orphan their old vectors on every edit/re-distill. The
+  workers auto-drop those orphans once they exceed
+  `SESSION_KB_COMPACT_ORPHAN_RATIO` of the live record count (or `POST
+  /api/index/compact`), so the matrix stays bounded.
 - **Cache key includes the system prompt.** Tuning any of the three system
   prompts (observations / tool-observations / lessons) automatically
   invalidates the right cache entries; no manual cache nukes.
@@ -213,6 +245,9 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `SESSION_KB_MEMORY_WATCH_INTERVAL_S` | 10 | Auto-memory filesystem-watch loop interval |
 | `SESSION_KB_LESSONS_INTERVAL_S` | 21600 | Scheduled lessons-distill interval (6h); `0` disables the worker |
 | `SESSION_KB_LESSONS_DAYS`      | 30  | Rolling window (days) the scheduled distiller scans |
+| `SESSION_KB_PROJECT_BOOST`     | 0.05 | Additive recall boost for sessions/memory whose project matches the caller's `boost_project` |
+| `SESSION_KB_KNOWLEDGE_GAP`     | 0.10 | Tail-trim: drop lessons/memory more than this far below the top knowledge score |
+| `SESSION_KB_COMPACT_ORPHAN_RATIO` | 1.25 | Auto-compact the embedding matrix once orphan vectors exceed this ratio of live records |
 
 ## Web UI
 
@@ -241,12 +276,13 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | Endpoint | Purpose |
 |---|---|
 | `GET  /api/meta` | counts, projects, freshness, indexing + enrichment progress |
+| `GET  /api/health` | cheap liveness probe (no reload): indexed/records/loadedAt + worker liveness |
 | `GET  /api/search?q=&project=&kind=&mode=keyword\|semantic&session=&limit=` | ranked records |
 | `GET  /api/record/{id}` | one record + its session |
 | `GET  /api/sessions?project=` | sessions w/ kebab labels + LLM summaries + filesCount + worktree |
 | `GET  /api/sessions/by-file?path=&limit=` | sessions that touched a file (suffix-matched) |
 | `GET  /api/graph?project=` | session-overview topology |
-| `GET  /api/recall?q=&limit=&min_score=&project=&exclude=` | semantic recall → `{sessions, lessons}` (sessions w/ decay + file boost; `lessons` = top distilled lessons + auto-memory facts) |
+| `GET  /api/recall?q=&limit=&min_score=&project=&exclude=&boost_project=` | semantic recall → `{sessions, lessons}` (sessions w/ decay + file boost + soft same-`boost_project` boost; `lessons` = top distilled lessons + auto-memory facts, gap-trimmed) |
 | `GET  /api/observe/{sid}` | read obs + label + summary for a session |
 | `POST /api/observe/{sid}[?sync=true]` | (re-)generate obs (background by default) |
 | `POST /api/observe/backfill` | generate for every session missing obs |
@@ -261,6 +297,7 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `GET  /api/memory[?type=&limit=]` | list ingested auto-memory facts (filter by user\|feedback\|project\|reference) |
 | `POST /api/memory/sync` | re-scan `~/.claude/projects/*/memory/*.md` now → returns ingest stats |
 | `GET  /api/memory/status` | last-scan stats + watch-loop interval |
+| `POST /api/index/compact` | drop orphaned embedding vectors now → `{removed, indexed}` (also auto-runs from the workers) |
 | `POST /api/legacy/import` + `import-observations` | one-shot bootstrap endpoints used during the historical migration |
 | `GET  /api/stream` | SSE; `refresh` when our DB grows, else `ping` with progress |
 
@@ -283,6 +320,8 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `skills/rename-session/SKILL.md` | Skill definition the global Claude registry picks up |
 | `static/index.html` | Explainer + teaching guide |
 | `static/kb.html` + `kb.js` + `theme.css` | The KB browser — cards + D3 force-graph + EventSource client |
+| `deploy/claude-session-kb.service` | systemd user-unit template (auto-start/restart the backend) |
+| `tests/` | pytest unit tests for the pure logic (ranking, merge, ingest, tags, projection) |
 | `.cache/` | Embedding cache + LLM response cache (git-ignored) |
 
 ## Worktree-aware capture

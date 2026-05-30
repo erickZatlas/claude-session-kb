@@ -93,6 +93,24 @@ class Embedder:
             self._save_cache()
             return len(missing)
 
+    def compact(self, live_ids: set[str]) -> int:
+        """Drop orphaned vectors — ids no longer present in the live record set
+        (e.g. old content-hashed memory/lesson ids whose source changed). sync()
+        only ever appends, so without this the matrix grows unbounded. Rebuilds
+        matrix/ids/index keeping only live ids, re-saves the cache, returns the
+        number removed. A vector wrongly dropped simply re-embeds on next sync()."""
+        with self._lock:
+            keep = [i for i, rid in enumerate(self.ids) if rid in live_ids]
+            removed = len(self.ids) - len(keep)
+            if removed <= 0:
+                return 0
+            self.matrix = (self.matrix[keep] if keep
+                           else np.zeros((0, self.dim), np.float32))
+            self.ids = [self.ids[i] for i in keep]
+            self.index = {rid: n for n, rid in enumerate(self.ids)}
+            self._save_cache()
+            return removed
+
     def search(self, query: str, candidate_records: list[dict], limit: int = 250) -> list[dict]:
         if not candidate_records or self.matrix.size == 0:
             return []

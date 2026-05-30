@@ -16,6 +16,8 @@ Register in ~/.claude/settings.json under hooks.UserPromptSubmit.
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import urllib.parse
 import urllib.request
@@ -27,6 +29,17 @@ MIN_PROMPT_LEN = 16         # shorter prompts aren't meaningful enough to recall
 MIN_SCORE = 0.32            # session cosine threshold — below this it's noise
 LESSON_MIN_SCORE = 0.30     # lessons/memory are cheap + high-value → looser floor
 TIMEOUT_S = 2.0             # never block the user for more than this
+
+# Worktree-aware project derivation — same shape as hooks/capture.py so the
+# project we send as boost_project matches the project sessions were stored under.
+_WORKTREE_RE = re.compile(r"^(.*?)/\.claude/worktrees/[^/]+(?:/|$)")
+
+
+def _project_from_cwd(cwd: str | None) -> str:
+    if not cwd:
+        return ""
+    m = _WORKTREE_RE.match(cwd)
+    return os.path.basename(m.group(1) if m else cwd)
 
 
 def _silent_exit() -> None:
@@ -40,12 +53,17 @@ def _read_input() -> dict:
         return {}
 
 
-def _fetch(prompt: str, exclude: str) -> tuple[list[dict], list[dict]]:
-    qs = urllib.parse.urlencode({"q": prompt, "limit": LIMIT, "exclude": exclude})
+def _fetch(prompt: str, exclude: str, boost_project: str = "") -> tuple[list[dict], list[dict]]:
+    params = {"q": prompt, "limit": LIMIT, "exclude": exclude}
+    if boost_project:
+        params["boost_project"] = boost_project
+    qs = urllib.parse.urlencode(params)
     try:
         with urllib.request.urlopen(f"{KB_URL}?{qs}", timeout=TIMEOUT_S) as r:
             data = json.load(r)
     except Exception:
+        if os.environ.get("SESSION_KB_DEBUG"):
+            print(f"claude-session-kb: recall unreachable at {KB_URL}", file=sys.stderr)
         return [], []
     sessions = [s for s in (data.get("sessions") or [])
                 if (s.get("score") or 0) >= MIN_SCORE]
@@ -123,9 +141,10 @@ def main() -> None:
     inp = _read_input()
     prompt = (inp.get("prompt") or "").strip()
     this_session = inp.get("session_id") or ""
+    boost_project = _project_from_cwd(inp.get("cwd"))
     if len(prompt) < MIN_PROMPT_LEN:
         _silent_exit()
-    sessions, lessons = _fetch(prompt, this_session)
+    sessions, lessons = _fetch(prompt, this_session, boost_project)
     if not sessions and not lessons:
         _silent_exit()
     print(json.dumps({
