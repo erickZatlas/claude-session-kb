@@ -159,14 +159,23 @@ class Store:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def _db_max_epoch(self, con) -> int:
-        row = con.execute(
-            "SELECT MAX(m) m FROM ("
-            "  SELECT MAX(created_at) m FROM observations "
-            "  UNION ALL "
-            "  SELECT MAX(started_at) FROM sessions"
-            ")"
-        ).fetchone()
-        return int(row["m"] or 0)
+        # Include lessons + memory_facts so a distill or a disk-synced memory
+        # edit (which touch neither observations nor sessions) still trips
+        # ensure_fresh() into reloading + re-embedding the corpus. Each source
+        # is queried defensively so a DB missing a newer table still works.
+        best = 0
+        for sql in (
+            "SELECT MAX(created_at) m FROM observations",
+            "SELECT MAX(started_at) m FROM sessions",
+            "SELECT MAX(created_at) m FROM lessons",
+            "SELECT MAX(updated_at) m FROM memory_facts",
+        ):
+            try:
+                row = con.execute(sql).fetchone()
+                best = max(best, int((row["m"] if row else 0) or 0))
+            except sqlite3.Error:
+                continue
+        return best
 
     def reload(self) -> None:
         if not os.path.exists(self.db_path):
@@ -180,6 +189,11 @@ class Store:
         try:
             sessions = self._fetch_sessions(con)
             records = self._fetch_observations(con)
+            # Durable cross-session knowledge joins the same corpus, so the
+            # embedder/search/recall path treats lessons + auto-memory facts as
+            # first-class records (kind 'lesson' / 'memory', no session attached).
+            records.extend(self._fetch_lessons(con))
+            records.extend(self._fetch_memory_facts(con))
             records.sort(key=lambda r: r["epoch"] or 0, reverse=True)
             for r in records:
                 r["_blob"] = _blob(r)
@@ -300,6 +314,81 @@ class Store:
             })
         return out
 
+    def _fetch_lessons(self, con) -> list:
+        """Project the lessons table into the shared record shape. kind/type =
+        'lesson'; no session attaches. id is 'lesson-<rowid>' — replace_lessons
+        wipes+reinserts with fresh rowids, so an updated lesson re-embeds."""
+        try:
+            rows = con.execute(
+                "SELECT id, title, text, tags, evidence_count, last_seen "
+                "FROM lessons ORDER BY last_seen DESC"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        out = []
+        for r in rows:
+            ts = int(r["last_seen"] or 0)
+            if ts > 10_000_000_000:
+                ts //= 1000
+            date_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)) if ts else ""
+            out.append({
+                "id": f"lesson-{r['id']}", "kind": "lesson", "type": "lesson",
+                "project": "",
+                "title": (r["title"] or "(untitled lesson)").strip(),
+                "subtitle": "",
+                "text": r["text"] or "",
+                "facts": [],
+                "concepts": _jarray(r["tags"]),
+                "files": [],
+                "sessionId": None, "memId": None,
+                "date": date_iso, "epoch": int(r["last_seen"] or 0),
+                "evidenceCount": int(r["evidence_count"] or 0),
+            })
+        return out
+
+    def _fetch_memory_facts(self, con) -> list:
+        """Project memory_facts (synced from ~/.claude/projects/*/memory/*.md by
+        memory_ingest) into the record shape. kind/type = 'memory'. The id is
+        content-hashed so an edited fact embeds as a fresh vector; the old one
+        is left orphaned in the matrix (never referenced via rec_by_id)."""
+        try:
+            rows = con.execute(
+                "SELECT content_hash, project, source_path, name, mem_type, "
+                "       description, text, tags, updated_at "
+                "FROM memory_facts ORDER BY updated_at DESC"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        out = []
+        for r in rows:
+            ts = int(r["updated_at"] or 0)
+            if ts > 10_000_000_000:
+                ts //= 1000
+            date_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)) if ts else ""
+            tags = _jarray(r["tags"])
+            mem_type = r["mem_type"] or "reference"
+            concepts = tags + ([mem_type] if mem_type not in tags else [])
+            out.append({
+                "id": f"mem-{r['content_hash']}", "kind": "memory", "type": "memory",
+                "project": r["project"] or "",
+                "title": (r["name"] or "(memory)").strip(),
+                "subtitle": (r["description"] or "").strip(),
+                "text": r["text"] or "",
+                "facts": [],
+                "concepts": concepts,
+                "files": [],
+                "sessionId": None, "memId": None,
+                "date": date_iso, "epoch": int(r["updated_at"] or 0),
+                "memType": mem_type,
+                "sourcePath": r["source_path"] or "",
+            })
+        return out
+
+    def knowledge_records(self) -> list:
+        """Lesson + memory records — the durable cross-session knowledge that
+        /api/recall surfaces in its own block (no time decay)."""
+        return [r for r in self.records if r.get("kind") in ("lesson", "memory")]
+
     def _passes(self, r, project, kind, session) -> bool:
         if project and project != "all" and r["project"] != project:
             return False
@@ -369,6 +458,8 @@ class Store:
         return {
             "counts": {
                 "observations": sum(1 for r in self.records if r["kind"] == "observation"),
+                "lessons": sum(1 for r in self.records if r["kind"] == "lesson"),
+                "memoryFacts": sum(1 for r in self.records if r["kind"] == "memory"),
                 "summaries": sum(1 for s in self.sessions if s.get("summary")),
                 "sessions": len(self.sessions),
             },

@@ -109,6 +109,26 @@ CREATE TABLE IF NOT EXISTS lessons (
   created_at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_last_seen ON lessons(last_seen DESC);
+
+-- Knowledge ingest: the hand-authored auto-memory under
+-- ~/.claude/projects/*/memory/*.md (one fact per file). Mirrored here so the
+-- shared record corpus (store.py) can embed + search them alongside
+-- observations and lessons. Synced from disk by memory_ingest.scan(); mtime +
+-- content_hash gate the writes so an unchanged file is a no-op.
+CREATE TABLE IF NOT EXISTS memory_facts (
+  id           TEXT PRIMARY KEY,            -- stable "<project>::<name>"
+  project      TEXT,
+  source_path  TEXT NOT NULL,
+  name         TEXT,
+  mem_type     TEXT,                        -- user|feedback|project|reference
+  description  TEXT,
+  text         TEXT NOT NULL,               -- the fact (file body)
+  tags         TEXT NOT NULL DEFAULT '[]',  -- JSON array
+  content_hash TEXT NOT NULL,               -- sha1(body) — drives the re-embed id
+  mtime        INTEGER NOT NULL,            -- source file mtime (epoch-ms)
+  updated_at   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_project ON memory_facts(project);
 """
 
 # Lightweight migrations — old DBs with the original schema get the new columns added.
@@ -539,6 +559,92 @@ class CaptureStore:
                     d[k] = json.loads(d[k] or "[]")
                 except json.JSONDecodeError:
                     d[k] = []
+            out.append(d)
+        return out
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Knowledge ingest: auto-memory facts synced from
+    # ~/.claude/projects/*/memory/*.md by memory_ingest.scan().
+    # ─────────────────────────────────────────────────────────────────────────
+    def distinct_projects(self) -> list[str]:
+        """Project names seen in the sessions table. memory_ingest uses these to
+        map a memory directory slug back to its real project name via suffix
+        match (e.g. '-home-erick-dev-claude-kb' -> 'claude-kb')."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT project FROM sessions WHERE project IS NOT NULL AND project != ''"
+            ).fetchall()
+        return [r["project"] for r in rows]
+
+    def upsert_memory_fact(self, fact: dict) -> str:
+        """Insert/update one memory fact. Returns 'inserted' | 'updated' |
+        'unchanged'. An unchanged file (same mtime AND content_hash) is a no-op
+        so a re-scan doesn't bump updated_at and trigger needless re-embeds."""
+        now = int(time.time() * 1000)
+        fid = fact["id"]
+        with self._lock, self._conn() as c:
+            existing = c.execute(
+                "SELECT mtime, content_hash FROM memory_facts WHERE id = ?", (fid,)
+            ).fetchone()
+            if existing and existing["mtime"] == int(fact["mtime"]) \
+                    and existing["content_hash"] == fact["content_hash"]:
+                return "unchanged"
+            c.execute(
+                "INSERT INTO memory_facts "
+                "  (id, project, source_path, name, mem_type, description, text, "
+                "   tags, content_hash, mtime, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET "
+                "  project=excluded.project, source_path=excluded.source_path, "
+                "  name=excluded.name, mem_type=excluded.mem_type, "
+                "  description=excluded.description, text=excluded.text, "
+                "  tags=excluded.tags, content_hash=excluded.content_hash, "
+                "  mtime=excluded.mtime, updated_at=excluded.updated_at",
+                (
+                    fid, fact.get("project"), fact["source_path"],
+                    fact.get("name"), fact.get("mem_type"), fact.get("description"),
+                    fact.get("text") or "",
+                    json.dumps(list(fact.get("tags") or [])[:8]),
+                    fact["content_hash"], int(fact["mtime"]), now,
+                ),
+            )
+            return "updated" if existing else "inserted"
+
+    def prune_memory_facts(self, keep_ids: list[str]) -> int:
+        """Delete memory_facts whose source file no longer exists on disk
+        (i.e. id not in keep_ids). Returns rows removed."""
+        with self._lock, self._conn() as c:
+            if not keep_ids:
+                cur = c.execute("DELETE FROM memory_facts")
+                return cur.rowcount or 0
+            placeholders = ",".join("?" for _ in keep_ids)
+            cur = c.execute(
+                f"DELETE FROM memory_facts WHERE id NOT IN ({placeholders})",
+                keep_ids,
+            )
+            return cur.rowcount or 0
+
+    def list_memory_facts(self, mem_type: Optional[str] = None,
+                          limit: int = 200) -> list[dict]:
+        with self._conn() as c:
+            if mem_type:
+                rows = c.execute(
+                    "SELECT * FROM memory_facts WHERE mem_type = ? "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (mem_type, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM memory_facts ORDER BY updated_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["tags"] = json.loads(d["tags"] or "[]")
+            except json.JSONDecodeError:
+                d["tags"] = []
             out.append(d)
         return out
 
