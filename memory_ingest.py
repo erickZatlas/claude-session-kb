@@ -105,7 +105,9 @@ def _fact_from_file(path: str, known: list[str]) -> dict | None:
         mem_type = "reference"
     dir_slug = os.path.basename(os.path.dirname(os.path.dirname(path)))
     project = _project_for_dir(dir_slug, known)
-    tags = observe.extract_topical_tags(name, description, body)
+    # Extract from description + body only (NOT name — it's the filename slug,
+    # which would tag every fact with its own ugly snake_case basename).
+    tags = observe.extract_topical_tags(description, body)
     if mem_type not in tags:
         tags = [mem_type] + tags
     content_hash = hashlib.sha1(body.encode("utf-8")).hexdigest()
