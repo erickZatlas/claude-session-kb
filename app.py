@@ -34,6 +34,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import llm
+import memory_ingest
 import observe
 from embeddings import Embedder
 from store import Enricher, Store
@@ -48,6 +49,15 @@ enricher = Enricher()
 capture = CaptureStore()  # Phase B: dual-write capture into our own SQLite
 _state = {"indexing": False}
 _sync_lock = threading.Lock()
+
+# Auto-memory ingest (~/.claude/projects/*/memory/*.md → memory_facts). Polled
+# on a throttle from the same code path as freshness, since the files change on
+# disk independently of our DB. A scan only writes when a file's mtime+hash
+# changed, so the common case is a cheap no-op and ensure_fresh() stays quiet.
+_memory_lock = threading.Lock()
+_memory_state = {"last_scan_at": 0.0, "scanned": 0, "inserted": 0,
+                 "updated": 0, "unchanged": 0, "pruned": 0}
+MEMORY_SCAN_THROTTLE_S = float(os.environ.get("SESSION_KB_MEMORY_SCAN_THROTTLE_S", "30"))
 
 
 def _index(records):
@@ -65,6 +75,32 @@ def _index(records):
 def _enrich():
     """Background LLM pass: clean labels + session summaries via DeepSeek (cached)."""
     enricher.sync(store.sessions, store.records)
+
+
+def _scan_memory() -> dict:
+    """Run one auto-memory ingest pass (disk → memory_facts). Writes only on
+    changed files, so the bumped updated_at lets ensure_fresh() pick them up.
+    Never raises — a missing memory dir just yields zeros."""
+    try:
+        stats = memory_ingest.scan(capture)
+    except Exception:
+        return dict(_memory_state)
+    _memory_state.update(stats)
+    _memory_state["last_scan_at"] = time.time()
+    return dict(_memory_state)
+
+
+def _maybe_scan_memory() -> None:
+    """Throttled, non-blocking memory scan. Skipped if another scan holds the
+    lock or the last scan was within MEMORY_SCAN_THROTTLE_S."""
+    if (time.time() - _memory_state["last_scan_at"]) < MEMORY_SCAN_THROTTLE_S:
+        return
+    if not _memory_lock.acquire(blocking=False):
+        return
+    try:
+        _scan_memory()
+    finally:
+        _memory_lock.release()
 
 
 # Phase E.B: background tool-call summarizer. Wakes every WORKER_INTERVAL_S
@@ -132,6 +168,9 @@ def _refresh_and_kick() -> bool:
     Defensive on purpose: a missing/locked/corrupt DB must NOT take down the
     read endpoints. We swallow any error, fall back to the in-memory snapshot."""
     try:
+        # Pick up any edited/added auto-memory files first; a write here bumps
+        # memory_facts.updated_at so ensure_fresh() reloads + re-embeds below.
+        _maybe_scan_memory()
         if store.ensure_fresh():
             threading.Thread(target=_index, args=(store.records,), daemon=True).start()
             threading.Thread(target=_enrich, daemon=True).start()
@@ -143,6 +182,9 @@ def _refresh_and_kick() -> bool:
 
 @asynccontextmanager
 async def lifespan(_app):
+    # Sync auto-memory before the first load so memory facts are in the corpus
+    # (and get embedded) from the start, not only after the first prompt.
+    _scan_memory()
     store.reload()
     # Embed in the background so keyword search is available immediately; the first
     # run embeds everything (minutes on CPU) and caches to .cache for fast restarts.
@@ -234,6 +276,12 @@ HALFLIFE_DAYS = float(os.environ.get("SESSION_KB_HALFLIFE_DAYS", "30"))
 FILE_BOOST_CAP = float(os.environ.get("SESSION_KB_FILE_BOOST_CAP", "0.25"))
 FILE_BOOST_PER_PATH = float(os.environ.get("SESSION_KB_FILE_BOOST_PER_PATH", "0.10"))
 
+# Durable knowledge (distilled lessons + hand-authored auto-memory) is surfaced
+# in its own recall block. It's cheap to show and high-value, so its threshold
+# is looser than sessions' and it is NOT time-decayed — durability is the point.
+KNOWLEDGE_MIN_SCORE = float(os.environ.get("SESSION_KB_KNOWLEDGE_MIN_SCORE", "0.28"))
+KNOWLEDGE_LIMIT = int(os.environ.get("SESSION_KB_KNOWLEDGE_LIMIT", "4"))
+
 # Same regex shape as the Bash file extractor in hooks/capture.py — used to
 # pull file-shaped tokens from the user's prompt at recall time.
 _QUERY_FILE_RE = __import__("re").compile(
@@ -264,6 +312,49 @@ def _extract_query_files(q):
     return out[:8]
 
 
+def _recall_knowledge(sims, min_score=KNOWLEDGE_MIN_SCORE,
+                      limit=KNOWLEDGE_LIMIT, project="all"):
+    """Rank durable knowledge (lessons + auto-memory facts) by raw cosine.
+    No time decay — durability is the point. Cheap: walks only the few dozen
+    knowledge records, reusing the already-computed `sims` row per embedded id.
+    Returns compact dicts for the recall payload's `lessons` field; [] when
+    nothing is indexed yet or clears the threshold (clean empty-table degrade).
+    """
+    scored = []
+    for r in store.knowledge_records():
+        # Lessons are global (project=""); memory facts are scoped — when a
+        # specific project is asked for, show that project's facts + global ones.
+        if project != "all" and r.get("kind") == "memory":
+            rp = r.get("project") or ""
+            if rp not in (project, "global", ""):
+                continue
+        idx = embedder.index.get(r["id"])
+        if idx is None:
+            continue
+        score = float(sims[int(idx)])
+        if score < min_score:
+            continue
+        scored.append((score, r))
+    scored.sort(key=lambda x: -x[0])
+    out = []
+    for score, r in scored[:limit]:
+        item = {
+            "kind": r.get("kind"),
+            "title": r.get("title") or "",
+            "text": (r.get("text") or "")[:400],
+            "tags": r.get("concepts") or [],
+            "score": round(score, 3),
+        }
+        if r.get("kind") == "memory":
+            item["memType"] = r.get("memType")
+            item["project"] = r.get("project") or ""
+            item["sourcePath"] = r.get("sourcePath") or ""
+        else:
+            item["evidence"] = r.get("evidenceCount", 0)
+        out.append(item)
+    return out
+
+
 @app.get("/api/recall")
 def api_recall(
     q: str = "",
@@ -284,7 +375,7 @@ def api_recall(
     _refresh_and_kick()
     q = (q or "").strip()
     if not q or embedder.matrix.size == 0:
-        return {"sessions": [], "indexing": _state["indexing"]}
+        return {"sessions": [], "lessons": [], "indexing": _state["indexing"]}
     qv = embedder.embed_query(q)
     sims = embedder.matrix @ qv  # one cosine per indexed record
     # Wider over-fetch than before — decay can demote top semantic matches
@@ -343,7 +434,11 @@ def api_recall(
             "score": round(final, 3),
             "matchedTitle": (r.get("title") or "")[:160],
         })
-    return {"sessions": sessions, "indexing": _state["indexing"]}
+    return {
+        "sessions": sessions,
+        "lessons": _recall_knowledge(sims, project=project),
+        "indexing": _state["indexing"],
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -754,6 +849,27 @@ def api_lessons(tag: str | None = None, limit: int = 50):
 @app.get("/api/lessons/status")
 def api_lessons_status():
     return dict(_lessons_state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Auto-memory facts — the hand-authored ~/.claude/projects/*/memory/*.md files,
+# mirrored into memory_facts and projected into the shared corpus by store.py.
+# ─────────────────────────────────────────────────────────────────────────────
+@app.get("/api/memory")
+def api_memory(type: str | None = None, limit: int = 200):
+    """List ingested auto-memory facts (optionally filtered by mem_type:
+    user|feedback|project|reference)."""
+    return {"memory": capture.list_memory_facts(mem_type=type, limit=limit)}
+
+
+@app.post("/api/memory/sync")
+def api_memory_sync():
+    """Re-scan the auto-memory directories now (disk → memory_facts). Returns
+    ingest stats. The throttled poll in _refresh_and_kick picks up changes
+    automatically too; this is the manual 'right now' trigger."""
+    with _memory_lock:
+        stats = _scan_memory()
+    return {"ok": True, **stats}
 
 
 @app.get("/api/sessions/by-file")

@@ -92,8 +92,27 @@ switches on once indexing finishes.
      tool_calls   ← Phase E queue: every PostToolUse, status=pending|processed
      session_files (path, kind, count) ← file-aware recall + 📁 chip
      lessons      (title, text, tags, source_session_ids)
+     memory_facts (name, mem_type, text, tags) ← auto-memory synced from disk
 ```
 
+- **Durable knowledge in recall.** `/api/recall` returns a `lessons` array
+  *alongside* the matching sessions: the top distilled **lessons** plus the
+  hand-authored **auto-memory** facts (see below). The `UserPromptSubmit` hook
+  renders them in a `### Relevant lessons & memory` block **above** the sessions,
+  so the densest, most durable learnings lead. Knowledge is **not** time-decayed
+  (durability is the point) and uses a looser score floor than sessions.
+- **Auto-memory ingest.** The hand-authored facts under
+  `~/.claude/projects/*/memory/*.md` (one fact per file, frontmatter
+  `name`/`description`/`metadata.type`, written by Claude Code's memory tool) are
+  mirrored into the `memory_facts` table by `memory_ingest.py` and **projected
+  into the same MiniLM corpus** as observations + lessons — so they show up in
+  recall, `/api/search`, the MCP tools, and the web UI. Synced on startup and on
+  a throttled poll (`SESSION_KB_MEMORY_SCAN_THROTTLE_S`, default 30s); a file is
+  re-embedded only when its `mtime` + content hash change, and a deleted file is
+  pruned. *Storage decision:* memory facts get their **own table** (not folded
+  into `lessons`, which `distill` wipes+rewrites; not `observations`, which are
+  session-scoped) but share the read-side record corpus via
+  `store._fetch_memory_facts`.
 - **Background summarizer**: every 60s, drains the `tool_calls` queue,
   hands each session's batch (≤50 calls) to DeepSeek, writes observations,
   marks the batch processed. 5-min cool-off before a session is eligible so
@@ -110,13 +129,14 @@ switches on once indexing finishes.
 
 ## MCP tools
 
-Registered in `~/.claude.json` under `mcpServers.session-kb`. Four tools:
+Registered in `~/.claude.json` under `mcpServers.session-kb`. Five tools:
 
 ```
 search_my_sessions(query, limit=5, project?, min_score=0.45)
     → semantic recall over your history. Same backend as the UserPromptSubmit
       hook, but the threshold defaults higher (0.45) — when Claude *chooses*
-      to search it wants confident hits.
+      to search it wants confident hits. Also surfaces the matching distilled
+      lessons + auto-memory facts (the `lessons` block) alongside sessions.
 
 get_session(session_id)
     → one session's label + summary + observations + topical tags.
@@ -132,6 +152,11 @@ list_lessons(tag?, limit=20)
       sessions (project conventions, architectural decisions, bug patterns).
       Use when grounding a task in long-standing project knowledge rather
       than one specific past session.
+
+list_memory_facts(type?, limit=50)
+    → the hand-authored auto-memory facts (~/.claude/projects/*/memory/*.md):
+      who the user is, feedback/preferences, project constraints, references.
+      Optionally filter by type (user|feedback|project|reference).
 ```
 
 Server file: `mcp_server.py`. Thin stdio wrapper — all heavy lifting stays
@@ -155,8 +180,10 @@ roles.
 
 Recall hook tunables in `hooks/recall.py`:
 
-- `MIN_SCORE = 0.32` — drop hits below this; raise to 0.45 to silence weak matches
+- `MIN_SCORE = 0.32` — drop session hits below this; raise to 0.45 to silence weak matches
 - `LIMIT = 3` — sessions injected per prompt
+- `LESSON_LIMIT = 4` — lessons/memory facts injected per prompt
+- `LESSON_MIN_SCORE = 0.30` — score floor for the lessons/memory block
 - `MIN_PROMPT_LEN = 16` — skip very short prompts (no signal)
 - `TIMEOUT_S = 2.0` — hook never blocks Claude for more than 2s
 
@@ -170,6 +197,9 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `SESSION_KB_HALFLIFE_DAYS`     | 30  | Recall time-decay half-life. Set 99999 to disable |
 | `SESSION_KB_FILE_BOOST_PER_PATH` | 0.10 | Score boost per file the query mentions that this session touched |
 | `SESSION_KB_FILE_BOOST_CAP`    | 0.25 | Max additive file-overlap boost |
+| `SESSION_KB_KNOWLEDGE_MIN_SCORE` | 0.28 | Score floor for lessons/memory in the recall `lessons` block |
+| `SESSION_KB_KNOWLEDGE_LIMIT`   | 4   | Max lessons/memory facts returned by `/api/recall` |
+| `SESSION_KB_MEMORY_SCAN_THROTTLE_S` | 30 | Min seconds between auto-memory disk re-scans |
 
 ## Web UI
 
@@ -200,7 +230,7 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `GET  /api/sessions?project=` | sessions w/ kebab labels + LLM summaries + filesCount + worktree |
 | `GET  /api/sessions/by-file?path=&limit=` | sessions that touched a file (suffix-matched) |
 | `GET  /api/graph?project=` | session-overview topology |
-| `GET  /api/recall?q=&limit=&min_score=&project=&exclude=` | semantic recall w/ decay + file boost |
+| `GET  /api/recall?q=&limit=&min_score=&project=&exclude=` | semantic recall → `{sessions, lessons}` (sessions w/ decay + file boost; `lessons` = top distilled lessons + auto-memory facts) |
 | `GET  /api/observe/{sid}` | read obs + label + summary for a session |
 | `POST /api/observe/{sid}[?sync=true]` | (re-)generate obs (background by default) |
 | `POST /api/observe/backfill` | generate for every session missing obs |
@@ -212,6 +242,8 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `POST /api/lessons/distill[?days=N&sync=true]` | rewrite the lessons table from last N days of obs |
 | `GET  /api/lessons[?tag=&limit=]` | list distilled lessons |
 | `GET  /api/lessons/status` | distillation state (running, obs_scanned, lessons_written) |
+| `GET  /api/memory[?type=&limit=]` | list ingested auto-memory facts (filter by user\|feedback\|project\|reference) |
+| `POST /api/memory/sync` | re-scan `~/.claude/projects/*/memory/*.md` now → returns ingest stats |
 | `POST /api/legacy/import` + `import-observations` | one-shot bootstrap endpoints used during the historical migration |
 | `GET  /api/stream` | SSE; `refresh` when our DB grows, else `ping` with progress |
 
@@ -220,13 +252,14 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | File | Role |
 |------|------|
 | `app.py` | FastAPI: REST + SSE + serves the frontend + worker thread orchestration |
-| `store.py` | Live read of `~/.claude-kb/data.db`, keyword search, freshness reload; exposes `filesCount` + `worktree` on each session |
-| `store_capture.py` | Capture store: sessions/prompts/observations/**tool_calls**/**session_files**/**lessons** tables + helpers |
+| `store.py` | Live read of `~/.claude-kb/data.db`; projects observations + **lessons** + **memory_facts** into one record corpus for embed/search/recall; exposes `filesCount` + `worktree` per session |
+| `store_capture.py` | Capture store: sessions/prompts/observations/**tool_calls**/**session_files**/**lessons**/**memory_facts** tables + helpers |
+| `memory_ingest.py` | Sync `~/.claude/projects/*/memory/*.md` (frontmatter + body) → `memory_facts`; dependency-free parser, mtime/hash-gated, prunes deleted files |
 | `observe.py` | Three DeepSeek prompts: per-session observations from prompts, per-batch observations from tool calls, cross-session lessons distiller |
 | `embeddings.py` | `all-MiniLM-L6-v2` embeddings, cosine search, incremental disk cache |
 | `llm.py` | DeepSeek client for kebab labels + 1–2 sentence summaries; hash-keyed disk cache |
-| `mcp_server.py` | Stdio MCP server exposing the 4 tools |
-| `hooks/recall.py` | `UserPromptSubmit` hook — pre-emptive context injection |
+| `mcp_server.py` | Stdio MCP server exposing the 5 tools |
+| `hooks/recall.py` | `UserPromptSubmit` hook — injects a lessons/memory block + related sessions |
 | `hooks/capture.py` | `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `Stop` hook dispatcher |
 | `scripts/rename-session.py` | Rename an old (closed) Claude Code session by editing its transcript JSONL + syncing the kb label |
 | `scripts/backfill-worktree-projects.py` | One-shot: rewrite legacy sessions whose project was set to a worktree dir name |

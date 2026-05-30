@@ -162,8 +162,8 @@
 </div>
 <ul>
   <li><strong>Live transcript</strong> &mdash; the full JSONL of a session. Reachable with <code>cont</code>, <code>cresume</code>, <code>cfind</code>. Expires after 90 days.</li>
-  <li><strong>claude-session-kb</strong> &mdash; <em>this</em> system. Every prompt is captured to <code>~/.claude-kb/data.db</code> via hooks. When each session ends, DeepSeek extracts 3&ndash;7 topical observations with domain-specific tags. Pre-emptive recall injects matching past sessions into every new prompt's context. Persistent. Self-contained.</li>
-  <li><strong>Auto-memory</strong> &mdash; the curated <code>MEMORY.md</code> notes, loaded into every session automatically.</li>
+  <li><strong>claude-session-kb</strong> &mdash; <em>this</em> system. Every prompt is captured to <code>~/.claude-kb/data.db</code> via hooks. When each session ends, DeepSeek extracts 3&ndash;7 topical observations with domain-specific tags. Pre-emptive recall injects matching past sessions <em>and</em> the most relevant durable lessons + auto-memory facts into every new prompt's context. Persistent. Self-contained.</li>
+  <li><strong>Auto-memory</strong> &mdash; the hand-authored one-fact-per-file notes under <code>~/.claude/projects/*/memory/*.md</code> (indexed by <code>MEMORY.md</code>), loaded into every session by Claude Code. claude-session-kb now <em>also</em> ingests these into its own search corpus (the <code>memory_facts</code> table), so they surface in recall, search, and the MCP tools &mdash; not just at session start.</li>
 </ul>
 
 <!-- 05 -->
@@ -173,7 +173,7 @@
 <div class="callout info">
   <span class="callout-icon">&#8505;</span>
   <div class="callout-body"><strong>Local &amp; live</strong>
-  <p>A small FastAPI backend (<code>python app.py</code>) owns <code>~/.claude-kb/data.db</code>. The capture hooks write to it as you work; a background worker thread inside the same process summarises tool-call batches every 60s; the recall hook reads from the embedded index and injects context before each prompt. Claude can also query it directly via four MCP tools (<code>search_my_sessions</code>, <code>get_session</code>, <code>find_sessions_by_file</code>, <code>list_lessons</code>). Nothing leaves your machine except optional DeepSeek calls for observation generation, lessons and labels &mdash; section 11.</p></div>
+  <p>A small FastAPI backend (<code>python app.py</code>) owns <code>~/.claude-kb/data.db</code>. The capture hooks write to it as you work; a background worker thread inside the same process summarises tool-call batches every 60s; the recall hook reads from the embedded index and injects context before each prompt &mdash; both matching sessions and a <strong>lessons &amp; memory</strong> block of durable cross-session learnings plus your hand-authored auto-memory. Claude can also query it directly via five MCP tools (<code>search_my_sessions</code>, <code>get_session</code>, <code>find_sessions_by_file</code>, <code>list_lessons</code>, <code>list_memory_facts</code>). Nothing leaves your machine except optional DeepSeek calls for observation generation, lessons and labels &mdash; section 11.</p></div>
 </div>
 <p>The rest of this page is the full guide: how the KB is organised, how to search and filter, how to read the graph, and the workflows it's actually good for.</p>
 
@@ -316,7 +316,7 @@
 <ul>
   <li><strong>3 to 7 topical observations per session</strong> on the Stop hook &mdash; each with a type (<code>discovery</code>, <code>change</code>, <code>bugfix</code>, <code>decision</code>, <code>refactor</code>, <code>feature</code>), a one-line title, 1&ndash;2 sentences of detail, and 2&ndash;5 <strong>domain-specific tags</strong>. The system prompt explicitly bans generic tokens like <code>how-it-works</code> / <code>what-changed</code>; a client-side filter drops anything that sneaks through.</li>
   <li><strong>1 to 4 observations per tool-call batch</strong> from a background worker thread that runs inside the FastAPI process. It wakes every 60s, finds sessions with pending tool calls older than 5min, and hands each batch (up to 50 calls) to DeepSeek. Output shape is identical to the prompt-driven observations &mdash; same topical-tag rules, same anti-filler invariant &mdash; but titles are past-tense and name the concrete file or identifier touched.</li>
-  <li><strong>Cross-session lessons</strong> when you run <code>POST /api/lessons/distill?days=N</code>: 5&ndash;15 durable patterns across the last N days of observations (project conventions, architectural decisions, recurring bug pedigrees) with kebab titles and source-session back-links. <code>list_lessons</code> MCP tool surfaces them to Claude.</li>
+  <li><strong>Cross-session lessons</strong> when you run <code>POST /api/lessons/distill?days=N</code>: 5&ndash;15 durable patterns across the last N days of observations (project conventions, architectural decisions, recurring bug pedigrees) with kebab titles and source-session back-links. These &mdash; together with your hand-authored auto-memory facts &mdash; are embedded into the same corpus and surface automatically in the recall hook's <em>lessons &amp; memory</em> block (and via the <code>list_lessons</code> / <code>list_memory_facts</code> MCP tools).</li>
   <li><strong>A kebab-case topic label per session</strong> &mdash; 1&ndash;3 lowercase words joined by hyphens (<code>stuck-charges</code>, <code>oxi-outage-probe</code>, <code>bem-stripe-cdp-fix</code>), shown on every card.</li>
   <li><strong>A 1&ndash;2 sentence summary per session</strong> &mdash; shown directly on every session card and in the detail panel.</li>
 </ul>
@@ -329,7 +329,7 @@
 
 <!-- 12 -->
 <h2 id="arch"><span class="section-num">SECTION 12</span>Under the hood</h2>
-<p>One Python process, one HTML page, five hooks, four MCP tools, one inline background worker.</p>
+<p>One Python process, one HTML page, five hooks, five MCP tools, one inline background worker.</p>
 <div class="diagram">
   <div class="diagram-title">data flow</div>
   <svg id="d-arch" viewBox="0 0 620 280"></svg>
@@ -337,13 +337,14 @@
 </div>
 <ul>
   <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + SSE channel + capture/observe endpoints + recall endpoint + lessons endpoints + the background tool-call summarizer thread. Serves the static frontend with no-cache headers and version-busted asset URLs.</li>
-  <li><strong><code>store.py</code></strong> &mdash; in-memory view of <code>~/.claude-kb/data.db</code>: sessions, observations, projects. Reloads when the DB grows. Exposes <code>filesCount</code> + <code>worktree</code> on each session.</li>
-  <li><strong><code>store_capture.py</code></strong> &mdash; the capture store: sessions / prompts / observations / <code>tool_calls</code> / <code>session_files</code> / <code>lessons</code> tables with lightweight migrations; thread-safe writers.</li>
+  <li><strong><code>store.py</code></strong> &mdash; in-memory view of <code>~/.claude-kb/data.db</code>: projects observations, lessons, and auto-memory facts into one record corpus (so all three embed + search alike), plus projects + sessions. Reloads when the DB grows. Exposes <code>filesCount</code> + <code>worktree</code> on each session.</li>
+  <li><strong><code>store_capture.py</code></strong> &mdash; the capture store: sessions / prompts / observations / <code>tool_calls</code> / <code>session_files</code> / <code>lessons</code> / <code>memory_facts</code> tables with lightweight migrations; thread-safe writers.</li>
+  <li><strong><code>memory_ingest.py</code></strong> &mdash; syncs the hand-authored auto-memory under <code>~/.claude/projects/*/memory/*.md</code> into <code>memory_facts</code>: dependency-free frontmatter parser, mtime/hash-gated upserts, prunes deleted files.</li>
   <li><strong><code>observe.py</code></strong> &mdash; three DeepSeek system prompts: per-session observations from prompts, per-batch observations from tool calls, and cross-session lessons distillation. Client-side regex tag extractor for bulk imports.</li>
   <li><strong><code>embeddings.py</code></strong> &mdash; embeds observations with <code>all-MiniLM-L6-v2</code>; persistent cache in <code>.cache/vectors.npy</code>; runs cosine search server-side.</li>
   <li><strong><code>llm.py</code></strong> &mdash; DeepSeek client for kebab labels + summaries; lazy; hash-keyed cache in <code>.cache/llm.json</code>.</li>
-  <li><strong><code>mcp_server.py</code></strong> &mdash; stdio MCP server exposing <code>search_my_sessions</code>, <code>get_session</code>, <code>find_sessions_by_file</code>, <code>list_lessons</code> as one-call tools for Claude.</li>
-  <li><strong><code>hooks/recall.py</code></strong> &mdash; UserPromptSubmit hook: hits <code>/api/recall</code> (which ranks by <em>cosine &times; time-decay + file-overlap-boost</em>), formats the result as <code>additionalContext</code>.</li>
+  <li><strong><code>mcp_server.py</code></strong> &mdash; stdio MCP server exposing <code>search_my_sessions</code>, <code>get_session</code>, <code>find_sessions_by_file</code>, <code>list_lessons</code>, <code>list_memory_facts</code> as one-call tools for Claude.</li>
+  <li><strong><code>hooks/recall.py</code></strong> &mdash; UserPromptSubmit hook: hits <code>/api/recall</code> (sessions ranked by <em>cosine &times; time-decay + file-overlap-boost</em>; lessons + auto-memory ranked by cosine, no decay), formats both into the <code>additionalContext</code> block.</li>
   <li><strong><code>hooks/capture.py</code></strong> &mdash; SessionStart / UserPromptSubmit / PostToolUse / Stop hook dispatcher: writes lifecycle, prompts, every tool call (with extracted files), triggers observation generation on completion.</li>
   <li><strong><code>static/kb.js</code></strong> &mdash; in-browser logic: card rendering (session + record), D3 force-graph drill-down, search debouncing, EventSource handling, detail panel, session banner.</li>
 </ul>
@@ -357,7 +358,7 @@
   <tr><td>GET /api/record/{id}</td><td>one record + its session</td></tr>
   <tr><td>GET /api/sessions</td><td>all sessions (with labels + summaries + worktree + filesCount when present)</td></tr>
   <tr><td>GET /api/sessions/by-file</td><td>sessions that touched a path (suffix-matched basename or full path)</td></tr>
-  <tr><td>GET /api/recall</td><td>semantic recall over your history; <em>cosine &times; decay + file-overlap-boost</em>; same backend the UserPromptSubmit hook uses</td></tr>
+  <tr><td>GET /api/recall</td><td>semantic recall → <code>{sessions, lessons}</code>: sessions by <em>cosine &times; decay + file-overlap-boost</em>, plus a <code>lessons</code> array of top distilled lessons + auto-memory facts; same backend the UserPromptSubmit hook uses</td></tr>
   <tr><td>GET /api/graph</td><td>session-overview nodes + shared-tag links</td></tr>
   <tr><td>GET /api/observe/{sid}</td><td>read one session's observations + label + summary</td></tr>
   <tr><td>POST /api/observe/{sid}</td><td>(re-)generate observations (background by default; <code>?sync=true</code> blocks)</td></tr>
@@ -366,6 +367,8 @@
   <tr><td>POST /api/worker/tick</td><td>drive one summarizer pass synchronously; <code>?min_age_s=0</code> ignores the 5min cool-off</td></tr>
   <tr><td>POST /api/lessons/distill</td><td>rewrite the lessons table from the last <code>?days=N</code> of observations (default 30)</td></tr>
   <tr><td>GET /api/lessons</td><td>list distilled lessons (optionally filter by <code>?tag=</code>)</td></tr>
+  <tr><td>GET /api/memory</td><td>list ingested auto-memory facts (optionally filter by <code>?type=</code> user|feedback|project|reference)</td></tr>
+  <tr><td>POST /api/memory/sync</td><td>re-scan <code>~/.claude/projects/*/memory/*.md</code> now → ingest stats</td></tr>
   <tr><td>GET /api/stream</td><td>SSE: <code>refresh</code> on data growth, <code>ping</code> with indexing/enrichment progress</td></tr>
 </tbody>
 </table>
@@ -390,6 +393,8 @@
   <tr><td>Resume a Claude conversation</td><td>session card or detail panel &rarr; <em>Copy resume</em></td></tr>
   <tr><td>Find past sessions that touched a file</td><td>MCP tool <code>find_sessions_by_file(path)</code> from Claude, or <code>GET /api/sessions/by-file?path=…</code></td></tr>
   <tr><td>See distilled cross-session lessons</td><td>MCP tool <code>list_lessons()</code>, or <code>GET /api/lessons</code></td></tr>
+  <tr><td>See your hand-authored auto-memory facts</td><td>MCP tool <code>list_memory_facts()</code>, or <code>GET /api/memory</code></td></tr>
+  <tr><td>Re-ingest auto-memory after editing a <code>memory/*.md</code></td><td><code>curl -X POST localhost:8000/api/memory/sync</code> (also auto-polled every 30s)</td></tr>
   <tr><td>Rebuild lessons from recent obs</td><td><code>curl -X POST 'localhost:8000/api/lessons/distill?days=30&amp;sync=true'</code> (~10s)</td></tr>
   <tr><td>Force this session's tool calls to summarize now</td><td><code>curl -X POST 'localhost:8000/api/worker/tick?min_age_s=0'</code> (otherwise: auto every 60s, 5min after last tool call)</td></tr>
   <tr><td>Check the worker's progress</td><td><code>curl localhost:8000/api/worker/status</code></td></tr>

@@ -172,29 +172,81 @@ async def list_tools() -> list[t.Tool]:
                 },
             },
         ),
+        t.Tool(
+            name="list_memory_facts",
+            description=(
+                "List the user's hand-authored auto-memory facts — the durable "
+                "one-fact-per-file notes under ~/.claude/projects/*/memory/*.md "
+                "(who the user is, feedback/preferences, project constraints, "
+                "external references). Use to ground in long-standing, "
+                "explicitly-recorded user knowledge. These also surface "
+                "automatically in search_my_sessions, but this lists them "
+                "directly, optionally filtered by type."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "Filter by memory type: user|feedback|project|reference. Omit for all.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max facts to return (default 50).",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                },
+            },
+        ),
     ]
 
 
 def _fmt_search(payload: dict) -> str:
     """Render /api/recall response as readable text (with a tail JSON dump for
-    the model to parse if it needs structured data)."""
+    the model to parse if it needs structured data). Surfaces both the matching
+    sessions AND the durable knowledge block (distilled lessons + auto-memory)."""
     sessions = payload.get("sessions") or []
-    if not sessions:
-        return "No matching sessions found above the score threshold."
-    lines = [f"{len(sessions)} session(s):"]
-    for s in sessions:
-        label = s.get("label") or "(no label)"
-        score = s.get("score", 0.0)
-        proj = s.get("project") or "?"
-        summary = (s.get("summary") or "").strip()
-        sid = s.get("id") or ""
-        obs = s.get("obsCount") or 0
-        lines.append(
-            f"\n- {label}  ·  {proj}  ·  {obs} obs  ·  score {score:.3f}\n"
-            f"  {summary[:220]}" + ("…" if len(summary) > 220 else "") + "\n"
-            f"  session_id: {sid}"
-        )
-    lines.append("\n--- raw json ---\n" + json.dumps(sessions, ensure_ascii=False))
+    lessons = payload.get("lessons") or []
+    if not sessions and not lessons:
+        return "No matching sessions or lessons found above the score threshold."
+    lines: list[str] = []
+
+    if lessons:
+        lines.append(f"{len(lessons)} relevant lesson(s)/memory fact(s):")
+        for l in lessons:
+            if l.get("kind") == "memory":
+                origin = f"memory:{l.get('memType') or 'note'}"
+            else:
+                ev = l.get("evidence") or 0
+                origin = f"lesson·{ev} sessions" if ev else "lesson"
+            tags = ", ".join(l.get("tags") or []) or "(none)"
+            text = (l.get("text") or "").strip()
+            lines.append(
+                f"\n- [{origin}] {l.get('title') or '(untitled)'}  ·  score {l.get('score', 0.0):.3f}\n"
+                f"  {text[:240]}" + ("…" if len(text) > 240 else "") + "\n"
+                f"  tags: {tags}"
+            )
+        lines.append("")
+
+    if sessions:
+        lines.append(f"{len(sessions)} session(s):")
+        for s in sessions:
+            label = s.get("label") or "(no label)"
+            score = s.get("score", 0.0)
+            proj = s.get("project") or "?"
+            summary = (s.get("summary") or "").strip()
+            sid = s.get("id") or ""
+            obs = s.get("obsCount") or 0
+            lines.append(
+                f"\n- {label}  ·  {proj}  ·  {obs} obs  ·  score {score:.3f}\n"
+                f"  {summary[:220]}" + ("…" if len(summary) > 220 else "") + "\n"
+                f"  session_id: {sid}"
+            )
+
+    lines.append("\n--- raw json ---\n" + json.dumps(
+        {"sessions": sessions, "lessons": lessons}, ensure_ascii=False))
     return "\n".join(lines)
 
 
@@ -291,6 +343,33 @@ async def call_tool(name: str, arguments: dict) -> list[t.TextContent]:
             lines.append(
                 f"\n- {L.get('title')}\n  {L.get('text')}\n  tags: {tags}\n"
                 f"  evidence: {L.get('evidence_count')} sessions, e.g. {sids}"
+            )
+        lines.append("\n--- raw json ---\n" + json.dumps(rows, ensure_ascii=False))
+        return [t.TextContent(type="text", text="\n".join(lines))]
+
+    if name == "list_memory_facts":
+        params: dict = {"limit": int(arguments.get("limit") or 50)}
+        if arguments.get("type"):
+            params["type"] = arguments["type"]
+        try:
+            data = _http_get("/api/memory", params)
+        except RuntimeError as e:
+            return [t.TextContent(type="text", text=f"error: {e}")]
+        rows = data.get("memory") or []
+        if not rows:
+            hint = " (run `POST /api/memory/sync` to ingest)" if not arguments.get("type") else ""
+            return [t.TextContent(type="text", text=f"No memory facts found{hint}.")]
+        lines = [f"{len(rows)} memory fact(s):"]
+        for m in rows:
+            tags = ", ".join(m.get("tags") or []) or "(none)"
+            desc = (m.get("description") or "").strip()
+            text = (m.get("text") or "").strip()
+            lines.append(
+                f"\n- [{m.get('mem_type') or 'note'}] {m.get('name') or '(unnamed)'}"
+                f"  ·  {m.get('project') or '?'}\n"
+                + (f"  {desc[:180]}\n" if desc else "")
+                + f"  {text[:240]}" + ("…" if len(text) > 240 else "") + "\n"
+                f"  tags: {tags}"
             )
         lines.append("\n--- raw json ---\n" + json.dumps(rows, ensure_ascii=False))
         return [t.TextContent(type="text", text="\n".join(lines))]

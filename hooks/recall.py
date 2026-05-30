@@ -22,8 +22,10 @@ import urllib.request
 
 KB_URL = "http://127.0.0.1:8000/api/recall"
 LIMIT = 3                   # how many sessions to surface, max
+LESSON_LIMIT = 4            # how many durable lessons/memory facts to surface, max
 MIN_PROMPT_LEN = 16         # shorter prompts aren't meaningful enough to recall on
-MIN_SCORE = 0.32            # cosine threshold — below this it's noise
+MIN_SCORE = 0.32            # session cosine threshold — below this it's noise
+LESSON_MIN_SCORE = 0.30     # lessons/memory are cheap + high-value → looser floor
 TIMEOUT_S = 2.0             # never block the user for more than this
 
 
@@ -38,17 +40,51 @@ def _read_input() -> dict:
         return {}
 
 
-def _fetch(prompt: str, exclude: str) -> list[dict]:
+def _fetch(prompt: str, exclude: str) -> tuple[list[dict], list[dict]]:
     qs = urllib.parse.urlencode({"q": prompt, "limit": LIMIT, "exclude": exclude})
     try:
         with urllib.request.urlopen(f"{KB_URL}?{qs}", timeout=TIMEOUT_S) as r:
             data = json.load(r)
     except Exception:
+        return [], []
+    sessions = [s for s in (data.get("sessions") or [])
+                if (s.get("score") or 0) >= MIN_SCORE]
+    lessons = [l for l in (data.get("lessons") or [])
+               if (l.get("score") or 0) >= LESSON_MIN_SCORE][:LESSON_LIMIT]
+    return sessions, lessons
+
+
+def _render_lessons(lessons: list[dict]) -> list[str]:
+    """Durable cross-session lessons + hand-authored auto-memory. Rendered above
+    the sessions block — densest, most actionable knowledge first."""
+    if not lessons:
         return []
-    return [s for s in (data.get("sessions") or []) if (s.get("score") or 0) >= MIN_SCORE]
+    lines = [
+        "### Relevant lessons & memory (auto-surfaced by claude-session-kb)",
+        "",
+        "_Durable cross-session learnings + your hand-authored auto-memory. Treat as background knowledge, ignore if not relevant._",
+        "",
+    ]
+    for l in lessons:
+        title = l.get("title") or "(untitled)"
+        score = l.get("score", 0)
+        if l.get("kind") == "memory":
+            origin = f"memory: {l.get('memType') or 'note'}"
+        else:
+            ev = l.get("evidence") or 0
+            origin = f"lesson · {ev} sessions" if ev else "lesson"
+        text = (l.get("text") or "").strip()
+        text = (text[:280] + "…") if len(text) > 280 else text
+        lines.append(f"- **{title}** · _{origin}_ · score {score:.2f}")
+        if text:
+            lines.append(f"  - {text}")
+        lines.append("")
+    return lines
 
 
-def _render(hits: list[dict]) -> str:
+def _render_sessions(hits: list[dict]) -> list[str]:
+    if not hits:
+        return []
     lines = [
         "### Related past sessions (auto-surfaced by claude-session-kb)",
         "",
@@ -69,7 +105,18 @@ def _render(hits: list[dict]) -> str:
         if s.get("id"):
             lines.append(f"  - To revisit: `claude --resume {s['id']}`")
         lines.append("")
-    return "\n".join(lines).rstrip()
+    return lines
+
+
+def _render(sessions: list[dict], lessons: list[dict]) -> str:
+    blocks = []
+    lesson_lines = _render_lessons(lessons)
+    if lesson_lines:
+        blocks.append("\n".join(lesson_lines).rstrip())
+    session_lines = _render_sessions(sessions)
+    if session_lines:
+        blocks.append("\n".join(session_lines).rstrip())
+    return "\n\n".join(blocks)
 
 
 def main() -> None:
@@ -78,13 +125,13 @@ def main() -> None:
     this_session = inp.get("session_id") or ""
     if len(prompt) < MIN_PROMPT_LEN:
         _silent_exit()
-    hits = _fetch(prompt, this_session)
-    if not hits:
+    sessions, lessons = _fetch(prompt, this_session)
+    if not sessions and not lessons:
         _silent_exit()
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": _render(hits),
+            "additionalContext": _render(sessions, lessons),
         }
     }))
 
