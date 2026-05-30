@@ -105,6 +105,28 @@ def _reload_and_index_now() -> None:
         pass
 
 
+# Compact the embedding matrix when orphan vectors (ids no longer in the live
+# record set — old content-hashed memory/lesson ids) exceed this ratio.
+COMPACT_ORPHAN_RATIO = float(os.environ.get("SESSION_KB_COMPACT_ORPHAN_RATIO", "1.25"))
+
+
+def _maybe_compact() -> int:
+    """Drop orphaned vectors when they pass COMPACT_ORPHAN_RATIO. Self-regulating
+    (no timer): called from the worker loops, which already touch the index.
+    Skipped mid-index. Returns #removed."""
+    if _state["indexing"] or not _sync_lock.acquire(blocking=False):
+        return 0
+    try:
+        live = set(store.rec_by_id)
+        if not live or len(embedder.ids) <= len(live) * COMPACT_ORPHAN_RATIO:
+            return 0
+        return embedder.compact(live)
+    except Exception:
+        return 0
+    finally:
+        _sync_lock.release()
+
+
 # Phase E.B: background tool-call summarizer. Wakes every WORKER_INTERVAL_S
 # seconds, drains pending tool_calls in batches per session, asks DeepSeek
 # for 1–4 observations per batch, marks the batch processed.
@@ -180,6 +202,7 @@ def _memory_watch_loop():
             stats = _scan_memory()
             if stats.get("inserted") or stats.get("updated") or stats.get("pruned"):
                 _reload_and_index_now()
+                _maybe_compact()
         except Exception:
             pass
 
@@ -196,6 +219,7 @@ def _lessons_loop():
         try:
             _distill_worker(LESSONS_DAYS, replace=False)
             _reload_and_index_now()
+            _maybe_compact()
         except Exception:
             pass
 
@@ -256,6 +280,25 @@ def api_meta():
     m["enriched"] = enricher.done
     m["enrichTotal"] = enricher.total
     return m
+
+
+@app.get("/api/health")
+def api_health():
+    """Cheap liveness probe (no reload) for the systemd unit + manual checks.
+    Reports indexed-vector count, live record count, last load time, and which
+    background workers are alive."""
+    return {
+        "ok": True,
+        "indexed": len(embedder.ids),
+        "records": len(store.records),
+        "loadedAt": store.loaded_at,
+        "indexing": _state["indexing"],
+        "workers": {
+            "tool_summarizer": _worker_state["running"],
+            "memory_watch": MEMORY_WATCH_INTERVAL_S > 0,
+            "lessons_distiller": LESSONS_INTERVAL_S > 0,
+        },
+    }
 
 
 @app.get("/api/search")
@@ -322,6 +365,13 @@ FILE_BOOST_PER_PATH = float(os.environ.get("SESSION_KB_FILE_BOOST_PER_PATH", "0.
 # is looser than sessions' and it is NOT time-decayed — durability is the point.
 KNOWLEDGE_MIN_SCORE = float(os.environ.get("SESSION_KB_KNOWLEDGE_MIN_SCORE", "0.28"))
 KNOWLEDGE_LIMIT = int(os.environ.get("SESSION_KB_KNOWLEDGE_LIMIT", "4"))
+# Precision tuning. PROJECT_BOOST is a small additive bump for sessions/knowledge
+# whose project matches the caller's current project (soft preference, never a
+# hard filter). KNOWLEDGE_GAP trims the weak tail: knowledge items more than this
+# far below the top knowledge score are dropped, so one strong lesson doesn't
+# drag in several marginal ones.
+PROJECT_BOOST = float(os.environ.get("SESSION_KB_PROJECT_BOOST", "0.05"))
+KNOWLEDGE_GAP = float(os.environ.get("SESSION_KB_KNOWLEDGE_GAP", "0.10"))
 
 # Same regex shape as the Bash file extractor in hooks/capture.py — used to
 # pull file-shaped tokens from the user's prompt at recall time.
@@ -354,12 +404,14 @@ def _extract_query_files(q):
 
 
 def _recall_knowledge(sims, min_score=KNOWLEDGE_MIN_SCORE,
-                      limit=KNOWLEDGE_LIMIT, project="all"):
+                      limit=KNOWLEDGE_LIMIT, project="all", boost_project=""):
     """Rank durable knowledge (lessons + auto-memory facts) by raw cosine.
     No time decay — durability is the point. Cheap: walks only the few dozen
     knowledge records, reusing the already-computed `sims` row per embedded id.
-    Returns compact dicts for the recall payload's `lessons` field; [] when
-    nothing is indexed yet or clears the threshold (clean empty-table degrade).
+    A small additive PROJECT_BOOST favors memory facts from `boost_project`; the
+    KNOWLEDGE_GAP tail-trim drops items far below the top score. Returns compact
+    dicts for the recall payload's `lessons` field; [] when nothing is indexed
+    yet or clears the threshold (clean empty-table degrade).
     """
     scored = []
     for r in store.knowledge_records():
@@ -375,8 +427,16 @@ def _recall_knowledge(sims, min_score=KNOWLEDGE_MIN_SCORE,
         score = float(sims[int(idx)])
         if score < min_score:
             continue
+        # Soft same-project preference (memory facts only; lessons are global).
+        if boost_project and r.get("kind") == "memory" \
+                and (r.get("project") or "") == boost_project:
+            score += PROJECT_BOOST
         scored.append((score, r))
     scored.sort(key=lambda x: -x[0])
+    # Tail-trim: keep only items within KNOWLEDGE_GAP of the top knowledge score.
+    if scored:
+        top = scored[0][0]
+        scored = [(s, r) for s, r in scored if s >= top - KNOWLEDGE_GAP]
     out = []
     for score, r in scored[:limit]:
         item = {
@@ -403,15 +463,20 @@ def api_recall(
     project: str = "all",
     exclude: str = "",
     min_score: float = 0.30,
+    boost_project: str = "",
 ):
-    """Pre-emptive recall with three ranking signals:
+    """Pre-emptive recall with four ranking signals:
       1. Cosine similarity over MiniLM embeddings (the primary signal)
       2. Time decay (half-life HALFLIFE_DAYS) so 6-month-old sessions don't
          outrank last-week's at the same cosine
       3. File-overlap boost (+0.10 per path, cap +0.25) when the query
          mentions files this session touched per session_files
+      4. Soft same-project boost (+PROJECT_BOOST) when a session's project
+         matches `boost_project` (the caller's current project) — a preference,
+         not a filter, so cross-project hits still surface.
 
-    Final session score = max over its records of (cosine * decay) + file_boost.
+    Final session score = max over its records of (cosine * decay) + file_boost
+    + project_boost.
     """
     _refresh_and_kick()
     q = (q or "").strip()
@@ -450,6 +515,8 @@ def api_recall(
                 overlap = 0
             if overlap:
                 boost = min(FILE_BOOST_CAP, FILE_BOOST_PER_PATH * overlap)
+        if boost_project and r.get("project") == boost_project:
+            boost += PROJECT_BOOST
         final = cosine_decayed + boost
         if final < min_score:
             continue
@@ -477,7 +544,7 @@ def api_recall(
         })
     return {
         "sessions": sessions,
-        "lessons": _recall_knowledge(sims, project=project),
+        "lessons": _recall_knowledge(sims, project=project, boost_project=boost_project),
         "indexing": _state["indexing"],
     }
 
@@ -588,6 +655,16 @@ def api_worker_tick(min_age_s: int | None = None):
     finally:
         WORKER_MIN_AGE_S = saved
     return {"ok": True, "observations_written": written, **_worker_state}
+
+
+@app.post("/api/index/compact")
+def api_index_compact():
+    """Force-drop orphaned embedding vectors now (ids no longer in the live
+    record set). Returns #removed + the new vector count. Runs automatically
+    from the worker loops once orphans pass SESSION_KB_COMPACT_ORPHAN_RATIO."""
+    with _sync_lock:
+        removed = embedder.compact(set(store.rec_by_id))
+    return {"ok": True, "removed": removed, "indexed": len(embedder.ids)}
 
 
 @app.get("/api/capture/stats")

@@ -4,3 +4,5 @@ numpy>=1.26
 # semantic search (query + document embedding); torch is the heavy one
 transformers>=4.40
 torch>=2.2
+# dev: unit tests for the pure logic (ranking, merge, ingest, tags)
+pytest>=8.0

@@ -1,0 +1,36 @@
+# systemd USER unit for the claude-session-kb backend.
+#
+# Keeps the FastAPI app alive across reboots/crashes so the UserPromptSubmit
+# recall hook always has a server to talk to (today it's a manual `nohup`,
+# which dies on reboot and silently disables recall).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/claude-session-kb.service ~/.config/systemd/user/
+#   # optional — provide DEEPSEEK_API_KEY (else the app degrades cleanly):
+#   #   printf 'DEEPSEEK_API_KEY=sk-...\n' > ~/.config/claude-kb.env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claude-session-kb
+#   loginctl enable-linger "$USER"   # so it runs even when you're not logged in
+#
+# Check / logs:
+#   systemctl --user status claude-session-kb
+#   journalctl --user -u claude-session-kb -f
+#   curl -s http://127.0.0.1:8000/api/health
+
+[Unit]
+Description=claude-session-kb backend (FastAPI recall + capture + workers)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/claude-kb
+ExecStart=/usr/bin/env python3 app.py
+# Optional env file (DEEPSEEK_API_KEY etc.). The leading '-' makes it optional.
+EnvironmentFile=-%h/.config/claude-kb.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
