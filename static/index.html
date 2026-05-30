@@ -173,7 +173,7 @@
 <div class="callout info">
   <span class="callout-icon">&#8505;</span>
   <div class="callout-body"><strong>Local &amp; live</strong>
-  <p>A small FastAPI backend (<code>python app.py</code>) owns <code>~/.claude-kb/data.db</code>. The capture hooks write to it as you work; a background worker thread inside the same process summarises tool-call batches every 60s; the recall hook reads from the embedded index and injects context before each prompt &mdash; both matching sessions and a <strong>lessons &amp; memory</strong> block of durable cross-session learnings plus your hand-authored auto-memory. Claude can also query it directly via five MCP tools (<code>search_my_sessions</code>, <code>get_session</code>, <code>find_sessions_by_file</code>, <code>list_lessons</code>, <code>list_memory_facts</code>). Nothing leaves your machine except optional DeepSeek calls for observation generation, lessons and labels &mdash; section 11.</p></div>
+  <p>A small FastAPI backend (<code>python app.py</code>) owns <code>~/.claude-kb/data.db</code>. The capture hooks write to it as you work; three background worker threads inside the same process summarise tool-call batches (every 60s), watch the auto-memory files for edits (every 10s), and distil cross-session lessons (every 6h); the recall hook reads from the embedded index and injects context before each prompt &mdash; both matching sessions and a <strong>lessons &amp; memory</strong> block of durable cross-session learnings plus your hand-authored auto-memory. Claude can also query it directly via five MCP tools (<code>search_my_sessions</code>, <code>get_session</code>, <code>find_sessions_by_file</code>, <code>list_lessons</code>, <code>list_memory_facts</code>). Nothing leaves your machine except optional DeepSeek calls for observation generation, lessons and labels &mdash; section 11.</p></div>
 </div>
 <p>The rest of this page is the full guide: how the KB is organised, how to search and filter, how to read the graph, and the workflows it's actually good for.</p>
 
@@ -333,10 +333,10 @@
 <div class="diagram">
   <div class="diagram-title">data flow</div>
   <svg id="d-arch" viewBox="0 0 620 280"></svg>
-  <div class="diagram-caption">Capture hooks write sessions, prompts, and every tool call to <code>~/.claude-kb/data.db</code>; a background worker thread in the same FastAPI process drains the tool-call queue into observations every 60s; the recall hook reads the embedded index and injects context. Web UI and MCP tools are both views over the same store.</div>
+  <div class="diagram-caption">Capture hooks write sessions, prompts, and every tool call to <code>~/.claude-kb/data.db</code>; three background workers in the same FastAPI process drain the tool-call queue into observations (60s), watch the auto-memory files (10s), and distil cross-session lessons (6h); the recall hook reads the embedded index and injects context. Web UI and MCP tools are both views over the same store.</div>
 </div>
 <ul>
-  <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + SSE channel + capture/observe endpoints + recall endpoint + lessons endpoints + the background tool-call summarizer thread. Serves the static frontend with no-cache headers and version-busted asset URLs.</li>
+  <li><strong><code>app.py</code></strong> &mdash; FastAPI: REST endpoints + SSE channel + capture/observe endpoints + recall endpoint (sessions + lessons/memory) + lessons/memory endpoints + three background worker threads (tool-call summarizer, auto-memory filesystem watch, scheduled lessons distiller). Serves the static frontend with no-cache headers and version-busted asset URLs.</li>
   <li><strong><code>store.py</code></strong> &mdash; in-memory view of <code>~/.claude-kb/data.db</code>: projects observations, lessons, and auto-memory facts into one record corpus (so all three embed + search alike), plus projects + sessions. Reloads when the DB grows. Exposes <code>filesCount</code> + <code>worktree</code> on each session.</li>
   <li><strong><code>store_capture.py</code></strong> &mdash; the capture store: sessions / prompts / observations / <code>tool_calls</code> / <code>session_files</code> / <code>lessons</code> / <code>memory_facts</code> tables with lightweight migrations; thread-safe writers.</li>
   <li><strong><code>memory_ingest.py</code></strong> &mdash; syncs the hand-authored auto-memory under <code>~/.claude/projects/*/memory/*.md</code> into <code>memory_facts</code>: dependency-free frontmatter parser, mtime/hash-gated upserts, prunes deleted files.</li>
@@ -365,10 +365,12 @@
   <tr><td>POST /api/capture/{start,prompt,tool,end}</td><td>hooks talk to these</td></tr>
   <tr><td>GET /api/worker/status</td><td>background tool-call summarizer state (running, batches processed, …)</td></tr>
   <tr><td>POST /api/worker/tick</td><td>drive one summarizer pass synchronously; <code>?min_age_s=0</code> ignores the 5min cool-off</td></tr>
-  <tr><td>POST /api/lessons/distill</td><td>rewrite the lessons table from the last <code>?days=N</code> of observations (default 30)</td></tr>
+  <tr><td>POST /api/lessons/distill</td><td>distil from the last <code>?days=N</code> of observations (default 30); <strong>merges</strong> by default, <code>?replace=true</code> wipes+rewrites. Also runs every 6h.</td></tr>
   <tr><td>GET /api/lessons</td><td>list distilled lessons (optionally filter by <code>?tag=</code>)</td></tr>
+  <tr><td>GET /api/lessons/status</td><td>distillation state + schedule (interval_s, days, scheduled)</td></tr>
   <tr><td>GET /api/memory</td><td>list ingested auto-memory facts (optionally filter by <code>?type=</code> user|feedback|project|reference)</td></tr>
   <tr><td>POST /api/memory/sync</td><td>re-scan <code>~/.claude/projects/*/memory/*.md</code> now → ingest stats</td></tr>
+  <tr><td>GET /api/memory/status</td><td>last-scan stats + watch-loop interval</td></tr>
   <tr><td>GET /api/stream</td><td>SSE: <code>refresh</code> on data growth, <code>ping</code> with indexing/enrichment progress</td></tr>
 </tbody>
 </table>
@@ -394,7 +396,7 @@
   <tr><td>Find past sessions that touched a file</td><td>MCP tool <code>find_sessions_by_file(path)</code> from Claude, or <code>GET /api/sessions/by-file?path=…</code></td></tr>
   <tr><td>See distilled cross-session lessons</td><td>MCP tool <code>list_lessons()</code>, or <code>GET /api/lessons</code></td></tr>
   <tr><td>See your hand-authored auto-memory facts</td><td>MCP tool <code>list_memory_facts()</code>, or <code>GET /api/memory</code></td></tr>
-  <tr><td>Re-ingest auto-memory after editing a <code>memory/*.md</code></td><td><code>curl -X POST localhost:8000/api/memory/sync</code> (also auto-polled every 30s)</td></tr>
+  <tr><td>Re-ingest auto-memory after editing a <code>memory/*.md</code></td><td><code>curl -X POST localhost:8000/api/memory/sync</code> (also auto-watched every 10s)</td></tr>
   <tr><td>Distill lessons from recent obs (merges; auto every 6h)</td><td><code>curl -X POST 'localhost:8000/api/lessons/distill?days=30&amp;sync=true'</code> (~10s; add <code>&amp;replace=true</code> to wipe+rewrite)</td></tr>
   <tr><td>Force this session's tool calls to summarize now</td><td><code>curl -X POST 'localhost:8000/api/worker/tick?min_age_s=0'</code> (otherwise: auto every 60s, 5min after last tool call)</td></tr>
   <tr><td>Check the worker's progress</td><td><code>curl localhost:8000/api/worker/status</code></td></tr>

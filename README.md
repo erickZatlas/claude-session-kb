@@ -224,7 +224,10 @@ Worker + recall tunables in env (read at request time — no restart needed):
   obs count, 📁 N (files touched), relative time, LLM summary, copy-resume
   button.
 - **Search active:** ranked record cards; click `from session: <kebab>` to
-  drill into the source.
+  drill into the source. Kind chips (`all` / `observations` / `lessons` /
+  `memory` / `summaries`) scope results — lessons + auto-memory records are
+  searchable here too (they have no source session, so they show without the
+  `from session:` link).
 - **Drill-down:** force graph of one session's observations + the records
   list + detail pane. A teal **session banner** at the top of the
   drill-down view always shows which session you're in (kebab label +
