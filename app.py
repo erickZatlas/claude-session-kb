@@ -50,14 +50,16 @@ capture = CaptureStore()  # Phase B: dual-write capture into our own SQLite
 _state = {"indexing": False}
 _sync_lock = threading.Lock()
 
-# Auto-memory ingest (~/.claude/projects/*/memory/*.md → memory_facts). Polled
-# on a throttle from the same code path as freshness, since the files change on
-# disk independently of our DB. A scan only writes when a file's mtime+hash
-# changed, so the common case is a cheap no-op and ensure_fresh() stays quiet.
+# Auto-memory ingest (~/.claude/projects/*/memory/*.md → memory_facts). A
+# dedicated background loop (_memory_watch_loop) re-scans every
+# MEMORY_WATCH_INTERVAL_S seconds — the files change on disk independently of
+# our DB, so this acts as a lightweight, dependency-free filesystem watch. A
+# scan only writes when a file's mtime+hash changed; a change kicks an immediate
+# reload + re-embed so edits surface in recall within one interval.
 _memory_lock = threading.Lock()
 _memory_state = {"last_scan_at": 0.0, "scanned": 0, "inserted": 0,
                  "updated": 0, "unchanged": 0, "pruned": 0}
-MEMORY_SCAN_THROTTLE_S = float(os.environ.get("SESSION_KB_MEMORY_SCAN_THROTTLE_S", "30"))
+MEMORY_WATCH_INTERVAL_S = float(os.environ.get("SESSION_KB_MEMORY_WATCH_INTERVAL_S", "10"))
 
 
 def _index(records):
@@ -79,28 +81,28 @@ def _enrich():
 
 def _scan_memory() -> dict:
     """Run one auto-memory ingest pass (disk → memory_facts). Writes only on
-    changed files, so the bumped updated_at lets ensure_fresh() pick them up.
-    Never raises — a missing memory dir just yields zeros."""
-    try:
-        stats = memory_ingest.scan(capture)
-    except Exception:
+    changed files. Lock-guarded so the watch loop and a manual /api/memory/sync
+    can't scan concurrently. Never raises — a missing memory dir yields zeros."""
+    with _memory_lock:
+        try:
+            stats = memory_ingest.scan(capture)
+        except Exception:
+            return dict(_memory_state)
+        _memory_state.update(stats)
+        _memory_state["last_scan_at"] = time.time()
         return dict(_memory_state)
-    _memory_state.update(stats)
-    _memory_state["last_scan_at"] = time.time()
-    return dict(_memory_state)
 
 
-def _maybe_scan_memory() -> None:
-    """Throttled, non-blocking memory scan. Skipped if another scan holds the
-    lock or the last scan was within MEMORY_SCAN_THROTTLE_S."""
-    if (time.time() - _memory_state["last_scan_at"]) < MEMORY_SCAN_THROTTLE_S:
-        return
-    if not _memory_lock.acquire(blocking=False):
-        return
+def _reload_and_index_now() -> None:
+    """Reload the store if the DB grew and, if so, kick background embedding +
+    enrichment. Used by the autonomous workers (memory watch + lessons distill)
+    so their writes surface promptly without waiting for the next read."""
     try:
-        _scan_memory()
-    finally:
-        _memory_lock.release()
+        if store.ensure_fresh():
+            threading.Thread(target=_index, args=(store.records,), daemon=True).start()
+            threading.Thread(target=_enrich, daemon=True).start()
+    except Exception:
+        pass
 
 
 # Phase E.B: background tool-call summarizer. Wakes every WORKER_INTERVAL_S
@@ -113,6 +115,14 @@ _worker_state = {"running": False, "sessions_done": 0, "obs_written": 0,
 WORKER_INTERVAL_S = int(os.environ.get("SESSION_KB_WORKER_INTERVAL_S", "60"))
 WORKER_MIN_AGE_S = int(os.environ.get("SESSION_KB_WORKER_MIN_AGE_S", "300"))
 WORKER_BATCH = int(os.environ.get("SESSION_KB_WORKER_BATCH", "50"))
+
+# Scheduled lessons distillation. The distiller is expensive (1 DeepSeek call
+# over the whole window) and the corpus moves slowly, so it runs on a long
+# interval — 6h by default. Set the interval to 0 to disable the worker (manual
+# POST /api/lessons/distill still works). Uses merge (not wipe-rewrite) so
+# durable lessons survive a run that didn't re-derive them.
+LESSONS_INTERVAL_S = int(os.environ.get("SESSION_KB_LESSONS_INTERVAL_S", "21600"))
+LESSONS_DAYS = int(os.environ.get("SESSION_KB_LESSONS_DAYS", "30"))
 
 
 def _tool_summarizer_tick():
@@ -160,6 +170,36 @@ def _tool_summarizer_loop():
         _worker_state["running"] = False
 
 
+def _memory_watch_loop():
+    """Dependency-free filesystem watch: re-scan the auto-memory dirs every
+    MEMORY_WATCH_INTERVAL_S. A scan that changed anything triggers an immediate
+    reload + re-embed so edits to memory/*.md surface in recall autonomously,
+    without waiting on read traffic."""
+    while not _worker_stop.wait(MEMORY_WATCH_INTERVAL_S):
+        try:
+            stats = _scan_memory()
+            if stats.get("inserted") or stats.get("updated") or stats.get("pruned"):
+                _reload_and_index_now()
+        except Exception:
+            pass
+
+
+def _lessons_loop():
+    """Scheduled lessons distillation. Waits one interval before the first run
+    (so restarts don't hammer the API), skips ticks when DeepSeek is disabled,
+    and merges results so durable lessons accumulate instead of being wiped."""
+    if LESSONS_INTERVAL_S <= 0:
+        return
+    while not _worker_stop.wait(LESSONS_INTERVAL_S):
+        if not llm.is_enabled():
+            continue
+        try:
+            _distill_worker(LESSONS_DAYS, replace=False)
+            _reload_and_index_now()
+        except Exception:
+            pass
+
+
 def _refresh_and_kick() -> bool:
     """Reload the store if our DB grew; if it did, kick background indexing and
     LLM enrichment for whatever new records arrived. Every read endpoint should
@@ -168,9 +208,6 @@ def _refresh_and_kick() -> bool:
     Defensive on purpose: a missing/locked/corrupt DB must NOT take down the
     read endpoints. We swallow any error, fall back to the in-memory snapshot."""
     try:
-        # Pick up any edited/added auto-memory files first; a write here bumps
-        # memory_facts.updated_at so ensure_fresh() reloads + re-embeds below.
-        _maybe_scan_memory()
         if store.ensure_fresh():
             threading.Thread(target=_index, args=(store.records,), daemon=True).start()
             threading.Thread(target=_enrich, daemon=True).start()
@@ -194,6 +231,10 @@ async def lifespan(_app):
     # Phase E.B: tool-call summarizer drains the queue every WORKER_INTERVAL_S
     _worker_stop.clear()
     threading.Thread(target=_tool_summarizer_loop, daemon=True).start()
+    # Phase G: autonomous workers — memory filesystem watch + scheduled lessons
+    # distillation. Both honor _worker_stop on shutdown.
+    threading.Thread(target=_memory_watch_loop, daemon=True).start()
+    threading.Thread(target=_lessons_loop, daemon=True).start()
     yield
     _worker_stop.set()
 
@@ -801,7 +842,7 @@ _lessons_state = {"running": False, "lessons_written": 0, "obs_scanned": 0,
                   "last_distilled_at": None, "last_error": None}
 
 
-def _distill_worker(days: int):
+def _distill_worker(days: int, replace: bool = False):
     if not _lessons_lock.acquire(blocking=False):
         return
     try:
@@ -818,7 +859,10 @@ def _distill_worker(days: int):
                 L["first_seen"] = since_ms
                 L["last_seen"] = now
                 L["evidence_count"] = len(L.get("source_session_ids") or [])
-            n = capture.replace_lessons(lessons)
+            # Default to merge so durable lessons accumulate; replace=true wipes
+            # and rewrites the whole table (the old behavior, kept as an option).
+            n = (capture.replace_lessons(lessons) if replace
+                 else capture.merge_lessons(lessons))
             _lessons_state["lessons_written"] = n
         _lessons_state["last_distilled_at"] = int(time.time())
     except Exception as e:
@@ -829,16 +873,21 @@ def _distill_worker(days: int):
 
 
 @app.post("/api/lessons/distill")
-def api_lessons_distill(days: int = 30, sync: bool = False):
-    """Run the distiller over the last `days` of observations and rewrite the
-    lessons table. Pass sync=true to block until done (1 DeepSeek call, ~10s);
-    default fires-and-forgets in a background thread so the caller returns
-    instantly."""
+def api_lessons_distill(days: int = 30, sync: bool = False, replace: bool = False):
+    """Run the distiller over the last `days` of observations. By default
+    MERGES results into the lessons table (durable lessons survive); pass
+    replace=true to wipe + rewrite. Also runs on a schedule (every
+    SESSION_KB_LESSONS_INTERVAL_S, 6h default). Pass sync=true to block until
+    done (1 DeepSeek call, ~10s); default fires-and-forgets."""
     if sync:
-        _distill_worker(days)
+        _distill_worker(days, replace)
+        _reload_and_index_now()
         return {"ok": True, **_lessons_state}
-    threading.Thread(target=_distill_worker, args=(days,), daemon=True).start()
-    return {"started": True, "days": days}
+    threading.Thread(
+        target=lambda: (_distill_worker(days, replace), _reload_and_index_now()),
+        daemon=True,
+    ).start()
+    return {"started": True, "days": days, "replace": replace}
 
 
 @app.get("/api/lessons")
@@ -848,7 +897,8 @@ def api_lessons(tag: str | None = None, limit: int = 50):
 
 @app.get("/api/lessons/status")
 def api_lessons_status():
-    return dict(_lessons_state)
+    return {**_lessons_state, "interval_s": LESSONS_INTERVAL_S,
+            "days": LESSONS_DAYS, "scheduled": LESSONS_INTERVAL_S > 0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -864,12 +914,19 @@ def api_memory(type: str | None = None, limit: int = 200):
 
 @app.post("/api/memory/sync")
 def api_memory_sync():
-    """Re-scan the auto-memory directories now (disk → memory_facts). Returns
-    ingest stats. The throttled poll in _refresh_and_kick picks up changes
-    automatically too; this is the manual 'right now' trigger."""
-    with _memory_lock:
-        stats = _scan_memory()
+    """Re-scan the auto-memory directories now (disk → memory_facts) and reload
+    + re-embed if anything changed. The background watch loop
+    (SESSION_KB_MEMORY_WATCH_INTERVAL_S) does this automatically too; this is the
+    manual 'right now' trigger."""
+    stats = _scan_memory()
+    if stats.get("inserted") or stats.get("updated") or stats.get("pruned"):
+        _reload_and_index_now()
     return {"ok": True, **stats}
+
+
+@app.get("/api/memory/status")
+def api_memory_status():
+    return {**_memory_state, "watch_interval_s": MEMORY_WATCH_INTERVAL_S}
 
 
 @app.get("/api/sessions/by-file")

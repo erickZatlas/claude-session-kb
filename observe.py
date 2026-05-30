@@ -247,8 +247,10 @@ _TAG_STOPWORDS = frozenset({
     "to", "in", "on", "at", "of", "as", "by", "or", "if", "is", "be",
     "do", "did", "done", "what", "when", "where", "why", "how", "who",
     "via", "use", "used", "make", "made", "set", "got", "has", "had",
+    "e.g", "i.e", "etc", "vs", "ok",
     # SHOUTED English the all-caps pattern would otherwise catch
     "resize", "ready", "about", "while", "should", "would", "could",
+    "ahead", "always", "never", "again", "also", "only", "even", "then",
     "must", "will", "shall", "true", "false", "null", "yes", "open",
     "close", "edit", "save", "load", "read", "write", "start", "stop",
     # generic project nouns
@@ -292,8 +294,13 @@ def extract_topical_tags(*texts: Optional[str], max_tags: int = 5) -> list[str]:
                 if not token or len(token) < 3 or len(token) > 40:
                     continue
                 key = token
-                # Stopword filter applies only to lowercase patterns (kebab + snake).
-                if i >= 2 and token.lower() in _TAG_STOPWORDS:
+                # Stopword filter applies to every pattern. SHOUTED English
+                # (AHEAD, ALWAYS, RESIZE) matches the CamelCase pattern too —
+                # its internal capitals satisfy the multi-group requirement — so
+                # the filter must run regardless of which pattern matched.
+                # Real acronyms (OXI, ZIF, BEM) and identifiers aren't stopwords,
+                # so they pass untouched.
+                if token.lower() in _TAG_STOPWORDS:
                     continue
                 if token.lower() in _GENERIC_TAGS:
                     continue

@@ -15,6 +15,7 @@ untouched.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -316,8 +317,9 @@ class Store:
 
     def _fetch_lessons(self, con) -> list:
         """Project the lessons table into the shared record shape. kind/type =
-        'lesson'; no session attaches. id is 'lesson-<rowid>' — replace_lessons
-        wipes+reinserts with fresh rowids, so an updated lesson re-embeds."""
+        'lesson'; no session attaches. id is content-hashed ('lesson-<hash>')
+        so an UPDATED lesson (merge_lessons keeps stable rowids) still embeds as
+        a fresh vector; the old one is left orphaned in the matrix."""
         try:
             rows = con.execute(
                 "SELECT id, title, text, tags, evidence_count, last_seen "
@@ -331,8 +333,11 @@ class Store:
             if ts > 10_000_000_000:
                 ts //= 1000
             date_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts)) if ts else ""
+            h = hashlib.sha1(
+                ((r["title"] or "") + "\0" + (r["text"] or "")).encode("utf-8")
+            ).hexdigest()[:16]
             out.append({
-                "id": f"lesson-{r['id']}", "kind": "lesson", "type": "lesson",
+                "id": f"lesson-{h}", "kind": "lesson", "type": "lesson",
                 "project": "",
                 "title": (r["title"] or "(untitled lesson)").strip(),
                 "subtitle": "",
@@ -397,6 +402,10 @@ class Store:
         if kind == "summaries" and r["kind"] != "summary":
             # We have no separate summary records — they live as a column on
             # sessions. The summaries filter therefore returns empty by design.
+            return False
+        if kind == "lessons" and r["kind"] != "lesson":
+            return False
+        if kind == "memory" and r["kind"] != "memory":
             return False
         if session and r.get("sessionId") != session:
             return False

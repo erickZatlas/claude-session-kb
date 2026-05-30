@@ -537,6 +537,60 @@ class CaptureStore:
                 )
             return len(lessons)
 
+    def merge_lessons(self, lessons: list[dict]) -> int:
+        """Upsert lessons by title (case-insensitive). For an existing title:
+        refresh text/tags, bump last_seen, and union source_session_ids (so
+        evidence accumulates). For a new title: insert. Crucially this NEVER
+        deletes — a durable lesson the distiller didn't re-derive this run
+        survives, unlike replace_lessons() which wipes the table. Returns the
+        number of lessons written (inserted + updated)."""
+        if not lessons:
+            return 0
+        now = int(time.time() * 1000)
+        with self._lock, self._conn() as c:
+            existing: dict[str, tuple] = {}
+            for r in c.execute(
+                "SELECT id, title, source_session_ids, first_seen FROM lessons"
+            ).fetchall():
+                existing[(r["title"] or "").strip().lower()] = (
+                    r["id"], r["source_session_ids"], r["first_seen"])
+            written = 0
+            for L in lessons:
+                title = (L.get("title") or "").strip()
+                if not title:
+                    continue
+                key = title.lower()
+                new_sids = [s for s in (L.get("source_session_ids") or [])
+                            if isinstance(s, str)]
+                tags = json.dumps(list(L.get("tags") or [])[:8])
+                text = (L.get("text") or "").strip()
+                last_seen = int(L.get("last_seen") or now)
+                if key in existing:
+                    lid, raw_sids, first_seen = existing[key]
+                    try:
+                        old_sids = json.loads(raw_sids or "[]")
+                    except json.JSONDecodeError:
+                        old_sids = []
+                    merged = list(dict.fromkeys([*old_sids, *new_sids]))[:32]
+                    c.execute(
+                        "UPDATE lessons SET text = ?, tags = ?, "
+                        "  source_session_ids = ?, evidence_count = ?, last_seen = ? "
+                        "WHERE id = ?",
+                        (text, tags, json.dumps(merged), len(merged), last_seen, lid),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO lessons "
+                        "  (title, text, tags, source_session_ids, evidence_count, "
+                        "   first_seen, last_seen, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (title[:200], text, tags, json.dumps(new_sids[:32]),
+                         int(L.get("evidence_count") or len(new_sids)),
+                         int(L.get("first_seen") or now), last_seen, now),
+                    )
+                written += 1
+            return written
+
     def list_lessons(self, tag: Optional[str] = None, limit: int = 50) -> list[dict]:
         with self._conn() as c:
             if tag:

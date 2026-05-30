@@ -372,8 +372,11 @@
   }
 
   function setCounts() {
+    const c = meta.counts;
+    const lessons = c.lessons ? ` · ${c.lessons} lessons` : "";
+    const mem = c.memoryFacts ? ` · ${c.memoryFacts} memory` : "";
     $("#kb-counts").textContent =
-      `${meta.counts.observations} observations · ${meta.counts.summaries} summaries · ${meta.counts.sessions} sessions · live`;
+      `${c.observations} observations${lessons}${mem} · ${c.summaries} summaries · ${c.sessions} sessions · live`;
   }
   function setStatus(msg) {
     const s = $("#sem-status");

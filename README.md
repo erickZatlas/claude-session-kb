@@ -106,18 +106,29 @@ switches on once indexing finishes.
   `name`/`description`/`metadata.type`, written by Claude Code's memory tool) are
   mirrored into the `memory_facts` table by `memory_ingest.py` and **projected
   into the same MiniLM corpus** as observations + lessons — so they show up in
-  recall, `/api/search`, the MCP tools, and the web UI. Synced on startup and on
-  a throttled poll (`SESSION_KB_MEMORY_SCAN_THROTTLE_S`, default 30s); a file is
-  re-embedded only when its `mtime` + content hash change, and a deleted file is
-  pruned. *Storage decision:* memory facts get their **own table** (not folded
+  recall, `/api/search`, the MCP tools, and the web UI. Synced on startup and by
+  a background **filesystem-watch loop** (`SESSION_KB_MEMORY_WATCH_INTERVAL_S`,
+  default 10s) that ingests + re-embeds autonomously; a file is re-embedded only
+  when its `mtime` + content hash change, and a deleted file is pruned.
+  *Storage decision:* memory facts get their **own table** (not folded
   into `lessons`, which `distill` wipes+rewrites; not `observations`, which are
   session-scoped) but share the read-side record corpus via
   `store._fetch_memory_facts`.
-- **Background summarizer**: every 60s, drains the `tool_calls` queue,
-  hands each session's batch (≤50 calls) to DeepSeek, writes observations,
-  marks the batch processed. 5-min cool-off before a session is eligible so
-  we don't fire mid-burst. All three timings configurable via env vars
-  (`SESSION_KB_WORKER_INTERVAL_S`, `_MIN_AGE_S`, `_BATCH`).
+- **Three background workers** run inside the FastAPI process (all honor a
+  shutdown event):
+  - *Tool-call summarizer* — every 60s, drains the `tool_calls` queue, hands
+    each session's batch (≤50 calls) to DeepSeek, writes observations, marks the
+    batch processed. 5-min cool-off before a session is eligible so we don't fire
+    mid-burst (`SESSION_KB_WORKER_INTERVAL_S`, `_MIN_AGE_S`, `_BATCH`).
+  - *Memory filesystem watch* — re-scans the auto-memory dirs every 10s; a change
+    triggers an immediate reload + re-embed (`SESSION_KB_MEMORY_WATCH_INTERVAL_S`).
+  - *Lessons distiller* — runs the cross-session lessons pass every 6h
+    (`SESSION_KB_LESSONS_INTERVAL_S`, `_DAYS`; set interval `0` to disable).
+    Skips ticks when `DEEPSEEK_API_KEY` is unset.
+- **Lessons merge, not wipe.** Distillation now **merges** by title — refresh
+  text/tags, bump `last_seen`, union evidence — so a durable lesson the distiller
+  didn't re-derive this run survives. `POST /api/lessons/distill?replace=true`
+  forces the old wipe-and-rewrite when you want a clean slate.
 - **Hooks fail silently.** Network blip, server down, missing DB — they
   swallow the error and exit 0. Claude Code is never blocked.
 - **No rebuild step.** `store.py` watches `data.db`'s `max(created_at)` and
@@ -199,7 +210,9 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `SESSION_KB_FILE_BOOST_CAP`    | 0.25 | Max additive file-overlap boost |
 | `SESSION_KB_KNOWLEDGE_MIN_SCORE` | 0.28 | Score floor for lessons/memory in the recall `lessons` block |
 | `SESSION_KB_KNOWLEDGE_LIMIT`   | 4   | Max lessons/memory facts returned by `/api/recall` |
-| `SESSION_KB_MEMORY_SCAN_THROTTLE_S` | 30 | Min seconds between auto-memory disk re-scans |
+| `SESSION_KB_MEMORY_WATCH_INTERVAL_S` | 10 | Auto-memory filesystem-watch loop interval |
+| `SESSION_KB_LESSONS_INTERVAL_S` | 21600 | Scheduled lessons-distill interval (6h); `0` disables the worker |
+| `SESSION_KB_LESSONS_DAYS`      | 30  | Rolling window (days) the scheduled distiller scans |
 
 ## Web UI
 
@@ -239,11 +252,12 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `GET  /api/capture/stats` | capture-store health (sessions / prompts / tools / active) |
 | `GET  /api/worker/status` | tool-call summarizer state (running, batches processed, …) |
 | `POST /api/worker/tick[?min_age_s=N]` | drive one summarizer pass synchronously |
-| `POST /api/lessons/distill[?days=N&sync=true]` | rewrite the lessons table from last N days of obs |
+| `POST /api/lessons/distill[?days=N&sync=true&replace=false]` | distill from last N days of obs; **merges** by default (`replace=true` wipes+rewrites) |
 | `GET  /api/lessons[?tag=&limit=]` | list distilled lessons |
-| `GET  /api/lessons/status` | distillation state (running, obs_scanned, lessons_written) |
+| `GET  /api/lessons/status` | distillation state + schedule (interval_s, days, scheduled) |
 | `GET  /api/memory[?type=&limit=]` | list ingested auto-memory facts (filter by user\|feedback\|project\|reference) |
 | `POST /api/memory/sync` | re-scan `~/.claude/projects/*/memory/*.md` now → returns ingest stats |
+| `GET  /api/memory/status` | last-scan stats + watch-loop interval |
 | `POST /api/legacy/import` + `import-observations` | one-shot bootstrap endpoints used during the historical migration |
 | `GET  /api/stream` | SSE; `refresh` when our DB grows, else `ping` with progress |
 
