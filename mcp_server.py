@@ -85,7 +85,7 @@ async def list_tools() -> list[t.Tool]:
                         "type": "string",
                         "description": (
                             "Filter by project directory name "
-                            "(e.g. 'zatlas-pms-middleware'). Omit for all projects."
+                            "(e.g. 'my-api-service'). Omit for all projects."
                         ),
                     },
                     "min_score": {
@@ -160,7 +160,7 @@ async def list_tools() -> list[t.Tool]:
                 "properties": {
                     "tag": {
                         "type": "string",
-                        "description": "Filter by a domain tag (e.g. 'OXI', 'BEM', 'kebab-labels'). Omit for all.",
+                        "description": "Filter by a domain tag (e.g. 'JWT', 'FastAPI', 'kebab-labels'). Omit for all.",
                     },
                     "limit": {
                         "type": "integer",

@@ -30,7 +30,7 @@ hooks wired into Claude Code's lifecycle. No external memory plugin required.
   observations as they accumulate. No separate daemon — the FastAPI process
   hosts both the API and the worker.
 - **Topical observations** — DeepSeek prompted to emit **domain-specific
-  tags** (`OperaPostCharge`, `AWAITING_CHECKIN`, `bem-stuck-payments`, file
+  tags** (`HttpClient`, `RetryPolicy`, `cache-invalidation`, file
   names, identifiers) — never generic filler like `how-it-works` /
   `what-changed`. Past-tense titles naming the concrete thing done.
 - **Cross-session "lessons"** — manual rollup that reads every observation
@@ -327,7 +327,7 @@ Worker + recall tunables in env (read at request time — no restart needed):
 ## Worktree-aware capture
 
 Sessions started inside `<repo>/.claude/worktrees/<name>/...` are attributed
-to the **parent repo** (so `zatlas-pms-middleware` shows up in the project
+to the **parent repo** (so `my-api-service` shows up in the project
 dropdown, not its dozens of transient worktrees), while the worktree name
 is preserved as a `wt: <name>` chip on the session card and a derived
 `worktree` field on the session dict. No schema migration; the worktree is
@@ -347,7 +347,7 @@ Set `DEEPSEEK_API_KEY` in your environment to enable:
   batch of ~50 PostToolUse events.
 - **Cross-session lessons** (manual `/api/lessons/distill`) — 5–15 durable
   patterns across the corpus.
-- **Kebab labels** per session — `stuck-charges`, `oxi-outage-probe`, etc.
+- **Kebab labels** per session — `auth-refactor`, `cache-invalidation`, etc.
 - **1–2 sentence summaries** per session.
 
 All five share `llm.py`'s disk cache at `.cache/llm.json`, keyed by

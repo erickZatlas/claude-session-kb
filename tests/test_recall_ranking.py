@@ -48,7 +48,7 @@ def test_knowledge_project_boost(monkeypatch):
         {"id": "m1", "kind": "memory", "title": "mine", "text": "", "concepts": [],
          "memType": "project", "project": "claude-kb", "sourcePath": ""},
         {"id": "m2", "kind": "memory", "title": "other", "text": "", "concepts": [],
-         "memType": "project", "project": "zatlas", "sourcePath": ""},
+         "memType": "project", "project": "other-svc", "sourcePath": ""},
     ]
     _patch(monkeypatch, recs, {"m1": 0, "m2": 1})
     sims = np.array([0.50, 0.52])  # m2 slightly higher raw
@@ -61,8 +61,8 @@ def test_knowledge_project_scoping(monkeypatch):
     recs = [
         {"id": "m1", "kind": "memory", "title": "kb", "text": "", "concepts": [],
          "memType": "feedback", "project": "claude-kb", "sourcePath": ""},
-        {"id": "m2", "kind": "memory", "title": "zat", "text": "", "concepts": [],
-         "memType": "feedback", "project": "zatlas", "sourcePath": ""},
+        {"id": "m2", "kind": "memory", "title": "other", "text": "", "concepts": [],
+         "memType": "feedback", "project": "other-svc", "sourcePath": ""},
         {"id": "g1", "kind": "memory", "title": "glob", "text": "", "concepts": [],
          "memType": "user", "project": "global", "sourcePath": ""},
     ]
@@ -70,5 +70,5 @@ def test_knowledge_project_scoping(monkeypatch):
     sims = np.array([0.60, 0.60, 0.60])
     out = app._recall_knowledge(sims, min_score=0.28, limit=10, project="claude-kb")
     titles = {o["title"] for o in out}
-    assert "zat" not in titles            # other project's memory excluded
+    assert "other" not in titles            # other project's memory excluded
     assert {"kb", "glob"} <= titles       # this project + global kept

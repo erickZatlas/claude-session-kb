@@ -9,7 +9,7 @@ def _cs(tmp_path):
 def test_merge_inserts_new(tmp_path):
     cs = _cs(tmp_path)
     n = cs.merge_lessons([
-        {"title": "oxi-zombie", "text": "v1", "tags": ["OXI"],
+        {"title": "pool-exhaustion", "text": "v1", "tags": ["SQL"],
          "source_session_ids": ["s1", "s2"]},
     ])
     assert n == 1
@@ -20,9 +20,9 @@ def test_merge_inserts_new(tmp_path):
 
 def test_merge_refreshes_and_unions_evidence(tmp_path):
     cs = _cs(tmp_path)
-    cs.merge_lessons([{"title": "oxi-zombie", "text": "v1", "tags": ["OXI"],
+    cs.merge_lessons([{"title": "pool-exhaustion", "text": "v1", "tags": ["SQL"],
                        "source_session_ids": ["s1", "s2"]}])
-    cs.merge_lessons([{"title": "OXI-Zombie", "text": "v2 updated", "tags": ["OXI", "kill"],
+    cs.merge_lessons([{"title": "Pool-Exhaustion", "text": "v2 updated", "tags": ["SQL", "pool"],
                        "source_session_ids": ["s2", "s9"]}])  # case-insensitive key
     rows = cs.list_lessons()
     assert len(rows) == 1, "same title (case-insensitive) must update, not duplicate"

@@ -19,11 +19,11 @@ def test_parse_frontmatter_missing():
 
 
 def test_project_for_dir_suffix_match():
-    known = ["claude-kb", "zatlas-pms-middleware", "zatlas-mono"]
+    known = ["claude-kb", "acme-api-gateway", "acme-web"]
     assert mi._project_for_dir("-home-erick-dev-claude-kb", known) == "claude-kb"
     assert mi._project_for_dir(
-        "-home-erick-dev-projects-zatlas-zatlas-pms-middleware", known
-    ) == "zatlas-pms-middleware"
+        "-home-erick-dev-projects-acme-acme-api-gateway", known
+    ) == "acme-api-gateway"
     assert mi._project_for_dir("-home-erick", known) == "global"  # no match → global
 
 
@@ -33,7 +33,7 @@ def test_fact_from_file(tmp_path):
     f = d / "feedback_thing.md"
     f.write_text('---\nname: feedback_thing\ndescription: "d"\n'
                  'metadata:\n  type: feedback\n---\n\n'
-                 'We ALWAYS RESIZE, e.g. use OXI and BEM here.')
+                 'We ALWAYS RESIZE, e.g. use API and SQL here.')
     fact = mi._fact_from_file(str(f), ["claude-kb"])
     assert fact["id"] == "claude-kb::feedback_thing"
     assert fact["project"] == "claude-kb"
@@ -43,7 +43,7 @@ def test_fact_from_file(tmp_path):
     assert "feedback" in fact["tags"]
     assert "feedback_thing" not in fact["tags"]
     assert "ALWAYS" not in fact["tags"] and "RESIZE" not in fact["tags"]
-    assert "OXI" in fact["tags"] and "BEM" in fact["tags"]
+    assert "API" in fact["tags"] and "SQL" in fact["tags"]
     assert len(fact["content_hash"]) == 40  # sha1 hex
 
 

@@ -96,7 +96,7 @@
   ]);
 
   // Pick the most distinctive single token from a record's title.
-  // Prefers UPPER_SNAKE acronyms (AWAITING_CHECKIN), then InitialCap, then longest.
+  // Prefers UPPER_SNAKE acronyms (RETRY_LIMIT), then InitialCap, then longest.
   function topToken(text) {
     if (!text) return null;
     const toks = (text.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || []).filter(
@@ -112,7 +112,7 @@
   }
 
   // Convert any string to a kebab label, trimmed to ~22 chars at a word
-  // boundary (so "verification-of-pms-config" doesn't get cut mid-word).
+  // boundary (so "verification-of-cache-config" doesn't get cut mid-word).
   function toKebab(text) {
     if (!text) return null;
     const s = String(text)
@@ -135,8 +135,8 @@
   //   3. 2 distinctive tokens from r.title, joined
   //   4. truncated title as a last resort
   // The 2-tag join is the new path that this user noticed was missing — single
-  // English words like "Reservation" / "Confirmed" carried no information when
-  // every node in a session is about reservations.
+  // English words like "Update" / "Handler" carried no information when
+  // every node in a session is about the same subsystem.
   function topTokens(text, n) {
     if (!text) return [];
     const toks = (text.match(/[A-Za-z_][A-Za-z0-9_]{3,}/g) || []).filter(
@@ -165,13 +165,13 @@
     if (r.label) return r.label;
     // Use our Phase C/D topical tags first — they're already domain-specific
     // (file names, identifiers, kebab concepts) and avoid the "every node says
-    // Reservation" problem.
+    // Update" problem.
     if (r.concepts && r.concepts.length) {
       const picks = r.concepts.slice(0, 2).map(String).join(" ");
       const kebab = toKebab(picks);
       if (kebab && kebab.includes("-")) return kebab;
       // single-tag case (e.g. tag was already a multi-word kebab like
-      // "stripe-paraty-acceptance") — keep it as-is via toKebab normalization
+      // "oauth-token-refresh") — keep it as-is via toKebab normalization
       const single = toKebab(r.concepts[0]);
       if (single) return single;
     }
