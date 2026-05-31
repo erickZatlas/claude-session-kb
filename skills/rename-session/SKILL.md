@@ -20,11 +20,11 @@ description: Rename an old Claude Code session by editing its transcript file. U
 
 Same shape as tab titles: short, lowercase, hyphen-separated slugs — 2-3 words max.
 
-Examples: `zif-trace`, `paraty-acceptance`, `ihg-posting-incident`, `no-show-fallback`, `claude-knowledge-base`.
+Examples: `auth-refactor`, `cache-invalidation`, `flaky-test-fix`, `db-migration`, `claude-knowledge-base`.
 
 - Lowercase only. Hyphens, not spaces.
 - 2-3 words. Skip filler ("investigation", "check", "review", "fix") unless it adds meaning the noun phrase lacks.
-- Subject + scope. Pick the most identifiable noun (system, hotel code, ticket subject) plus a one-word qualifier.
+- Subject + scope. Pick the most identifiable noun (system, error code, ticket subject) plus a one-word qualifier.
 - **Never use ticket numbers (ZS-XXXX), PR numbers (#XXX), or other opaque IDs** unless the user explicitly asked for one.
 
 If the user didn't pick a name, suggest one from the session's existing content (you can look it up with the `search_my_sessions` MCP tool or `GET /api/observe/<sid>` against `localhost:8000`).
@@ -52,7 +52,7 @@ Useful flags:
 
 ## Steps for the assistant
 
-1. **Identify the session.** Ask the user for the UUID/prefix if they didn't paste one. If they gave only a topic ("the oxi outage session from last week"), use `search_my_sessions` (MCP tool) or curl `localhost:8000/api/recall?q=<topic>` to find candidates and confirm with the user before proceeding.
+1. **Identify the session.** Ask the user for the UUID/prefix if they didn't paste one. If they gave only a topic ("the auth refactor session from last week"), use `search_my_sessions` (MCP tool) or curl `localhost:8000/api/recall?q=<topic>` to find candidates and confirm with the user before proceeding.
 2. **Propose the new name** if the user hasn't given one. Use the format above; offer 2-3 options and let them pick.
 3. **Always dry-run first** if there's any ambiguity ("looks like this is the one — preview the change?"):
    ```bash

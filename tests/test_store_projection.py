@@ -8,7 +8,7 @@ def _seed(tmp_path):
     cs = store_capture.CaptureStore(db)
     cs.session_start("s1", "claude-kb", "/home/erick/dev/claude-kb", None)
     cs.replace_observations("s1", [
-        {"type": "discovery", "title": "obs one", "text": "body", "tags": ["OXI"]},
+        {"type": "discovery", "title": "obs one", "text": "body", "tags": ["SQL"]},
     ])
     cs.merge_lessons([
         {"title": "lesson-a", "text": "L body", "tags": ["t"], "source_session_ids": ["s1"]},

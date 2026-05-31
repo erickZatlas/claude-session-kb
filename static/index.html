@@ -115,7 +115,7 @@
 
 <!-- 02 -->
 <h2 id="slug"><span class="section-num">SECTION 02</span>One slug, everywhere</h2>
-<p>Pick a short kebab <strong>slug</strong> per task &mdash; <code>no-show-fallback</code>, <code>zif-trace</code>. Use that one identifier in three places, so the task is recognizable no matter where you look.</p>
+<p>Pick a short kebab <strong>slug</strong> per task &mdash; <code>auth-refactor</code>, <code>cache-invalidation</code>. Use that one identifier in three places, so the task is recognizable no matter where you look.</p>
 <div class="diagram">
   <div class="diagram-title">Slug &rarr; three destinations</div>
   <svg id="d-slug" viewBox="0 0 600 240"></svg>
@@ -181,7 +181,7 @@
 <h2 id="views"><span class="section-num">SECTION 06</span>The two views: cards overview &amp; drill-down</h2>
 <p>The KB only ever shows one of two things, and you flip between them by clicking.</p>
 <h3>Overview &mdash; session cards (default)</h3>
-<p>The default view. The main pane is a scrollable column of <strong>session cards</strong>: each card has a kebab-case topic title (<code>stuck-charges</code>, <code>opera-cloud</code>, <code>bem-1password</code>), a strip of <em>project</em> + <em>wt: worktree</em> (when the session was started inside <code>&lt;repo&gt;/.claude/worktrees/&lt;name&gt;/</code>) + <em>observation count</em> + <em>&#x1F4C1; N</em> (distinct files touched via PostToolUse capture) + <em>relative time</em>, the LLM's 1&ndash;2 sentence summary (or the session's prompt as a fallback), and a one-click <strong>Copy resume</strong> button.</p>
+<p>The default view. The main pane is a scrollable column of <strong>session cards</strong>: each card has a kebab-case topic title (<code>auth-refactor</code>, <code>db-migration</code>, <code>flaky-tests</code>), a strip of <em>project</em> + <em>wt: worktree</em> (when the session was started inside <code>&lt;repo&gt;/.claude/worktrees/&lt;name&gt;/</code>) + <em>observation count</em> + <em>&#x1F4C1; N</em> (distinct files touched via PostToolUse capture) + <em>relative time</em>, the LLM's 1&ndash;2 sentence summary (or the session's prompt as a fallback), and a one-click <strong>Copy resume</strong> button.</p>
 <p>The toolbar has a <em>recent</em> / <em>activity</em> sort toggle that re-orders the cards in place &mdash; recent-first when you want to see what you just did, activity-first when you want the heaviest investigations at the top.</p>
 <div class="callout tip">
   <span class="callout-icon">&#128196;</span>
@@ -189,7 +189,7 @@
   <p>Earlier iterations tried a force-graph map and a project-swimlane timeline. Both collapsed into noise at ~100 sessions: any 2D layout that labels every dot loses to text density. Cards put text where text belongs.</p></div>
 </div>
 <h3 class="blue">Drill-down &mdash; one session expanded into a force graph</h3>
-<p>Click any session card and the view switches to drill-down. The session becomes the teal anchor at the centre of a force graph. Its observations and summaries fan out as smaller coloured nodes (colours described in section 09). Each node is labelled with a 2-token kebab derived from the observation's topical tags (e.g. <code>pms-zs-1837</code>, <code>booking-expedia</code>) &mdash; never a generic English word like &ldquo;Reservation&rdquo;. A teal <strong>session banner</strong> across the top of the drill-down view always shows which session you're in (kebab label + project + worktree + observation count + summary). A records list of the same observations fills the middle pane; the detail panel on the right shows whichever item you click. The <strong>&larr; all sessions</strong> button (top of the graph pane) takes you back to the cards.</p>
+<p>Click any session card and the view switches to drill-down. The session becomes the teal anchor at the centre of a force graph. Its observations and summaries fan out as smaller coloured nodes (colours described in section 09). Each node is labelled with a 2-token kebab derived from the observation's topical tags (e.g. <code>retry-backoff</code>, <code>pool-exhaustion</code>) &mdash; never a generic English word like &ldquo;Update&rdquo;. A teal <strong>session banner</strong> across the top of the drill-down view always shows which session you're in (kebab label + project + worktree + observation count + summary). A records list of the same observations fills the middle pane; the detail panel on the right shows whichever item you click. The <strong>&larr; all sessions</strong> button (top of the graph pane) takes you back to the cards.</p>
 <div class="callout muted">
   <span class="callout-icon">&#128279;</span>
   <div class="callout-body"><strong>Search re-shapes the overview</strong>
@@ -201,13 +201,13 @@
 <p>Two modes; one button. The chip in the toolbar toggles between them.</p>
 <h3>Keyword</h3>
 <p>Substring + token match across record title, subtitle, full text, facts, concepts, and file basenames. Server-side, ranked by where the match landed (title hits weighted higher). Instant. The default.</p>
-<p>Use it when you remember a literal word from the data: an identifier (<code>AWAITING_CHECKIN</code>), a session id prefix, a file name, a hotel code, a person's name.</p>
+<p>Use it when you remember a literal word from the data: an identifier (<code>RETRY_LIMIT</code>), a session id prefix, a file name, an error code, a person's name.</p>
 <h3 class="amber">Semantic</h3>
 <p>Toggle the <em>semantic</em> chip. Your query is embedded server-side with the same <code>all-MiniLM-L6-v2</code> model used to embed the records, then ranked by cosine similarity. <strong>No keyword overlap required &mdash; it finds matches by meaning.</strong></p>
 <p>Use it when you remember the <em>shape</em> of what happened but not the words. Examples that work:</p>
 <ul>
-  <li>"why do charges get stuck and never post" &rarr; the <code>AWAITING_CHECKIN</code> deferral investigation</li>
-  <li>"alerting when a hotel integration goes down" &rarr; the OXI outage monitoring sessions</li>
+  <li>"why do requests hang and never return" &rarr; the <code>RETRY_LIMIT</code> backoff investigation</li>
+  <li>"why did the deploy fail last week" &rarr; the CI pipeline debugging sessions</li>
   <li>"that thing about credit card fees" &rarr; the right session even if it never said "fees"</li>
 </ul>
 <div class="callout warn">
@@ -223,14 +223,14 @@
 <table>
 <thead><tr><th>Control</th><th>What it does</th></tr></thead>
 <tbody>
-  <tr><td>project dropdown</td><td>Limits the cards and the search results to one project (e.g. <code>zatlas-pms-middleware</code>). Default: all projects.</td></tr>
+  <tr><td>project dropdown</td><td>Limits the cards and the search results to one project (e.g. <code>my-api-service</code>). Default: all projects.</td></tr>
   <tr><td>kind chips: all / observations / summaries</td><td>In search mode, restricts the result records by type. Observations are atomic findings extracted from each session; summaries are session-level rollups stored on the session itself (one per session, written when the Stop hook fires).</td></tr>
   <tr><td>mode chips: keyword / semantic</td><td>Switches search backend &mdash; covered in section 07.</td></tr>
   <tr><td>sort chips: recent / activity</td><td>Re-orders session cards in the overview. Hidden during search (the API's ranking is the order). Hidden in drill-down (records keep their own order). Default: <em>recent</em>.</td></tr>
 </tbody>
 </table>
 </div>
-<p>Everything composes. A typical query: <em>semantic + project="pms-middleware" + kind="summaries"</em> &mdash; "show me session-level rollups in this project that semantically match my phrase."</p>
+<p>Everything composes. A typical query: <em>semantic + project="my-api-service" + kind="summaries"</em> &mdash; "show me session-level rollups in this project that semantically match my phrase."</p>
 
 <!-- 09 -->
 <h2 id="reading"><span class="section-num">SECTION 09</span>Reading the drill-down graph</h2>
@@ -317,7 +317,7 @@
   <li><strong>3 to 7 topical observations per session</strong> on the Stop hook &mdash; each with a type (<code>discovery</code>, <code>change</code>, <code>bugfix</code>, <code>decision</code>, <code>refactor</code>, <code>feature</code>), a one-line title, 1&ndash;2 sentences of detail, and 2&ndash;5 <strong>domain-specific tags</strong>. The system prompt explicitly bans generic tokens like <code>how-it-works</code> / <code>what-changed</code>; a client-side filter drops anything that sneaks through.</li>
   <li><strong>1 to 4 observations per tool-call batch</strong> from a background worker thread that runs inside the FastAPI process. It wakes every 60s, finds sessions with pending tool calls older than 5min, and hands each batch (up to 50 calls) to DeepSeek. Output shape is identical to the prompt-driven observations &mdash; same topical-tag rules, same anti-filler invariant &mdash; but titles are past-tense and name the concrete file or identifier touched.</li>
   <li><strong>Cross-session lessons</strong>, distilled on a schedule (every 6h, or on-demand via <code>POST /api/lessons/distill?days=N</code>): 5&ndash;15 durable patterns across the last N days of observations (project conventions, architectural decisions, recurring bug pedigrees) with kebab titles and source-session back-links. Runs <strong>merge</strong> by default &mdash; a durable lesson the distiller didn't re-derive this run survives (evidence accumulates) instead of being wiped. These &mdash; together with your hand-authored auto-memory facts &mdash; are embedded into the same corpus and surface automatically in the recall hook's <em>lessons &amp; memory</em> block (and via the <code>list_lessons</code> / <code>list_memory_facts</code> MCP tools).</li>
-  <li><strong>A kebab-case topic label per session</strong> &mdash; 1&ndash;3 lowercase words joined by hyphens (<code>stuck-charges</code>, <code>oxi-outage-probe</code>, <code>bem-stripe-cdp-fix</code>), shown on every card.</li>
+  <li><strong>A kebab-case topic label per session</strong> &mdash; 1&ndash;3 lowercase words joined by hyphens (<code>auth-refactor</code>, <code>cache-invalidation</code>, <code>webhook-retry-fix</code>), shown on every card.</li>
   <li><strong>A 1&ndash;2 sentence summary per session</strong> &mdash; shown directly on every session card and in the detail panel.</li>
 </ul>
 <p>Cost is pennies on the first run; everything caches to <code>.cache/llm.json</code> keyed by <code>sha256(model + kind + system_prompt + payload)</code> &mdash; tweaking any system prompt invalidates only its own entries. New sessions get enriched incrementally as their Stop hook fires; tool-call batches drain incrementally as the worker ticks.</p>
@@ -476,7 +476,7 @@
   // Diagram 1 — slug fan-out
   render('d-slug', {
     nodes:[
-      { id:'slug', x:130, y:120, w:170, h:48, style:'primary', mono:true, label:'slug\nno-show-fallback' },
+      { id:'slug', x:130, y:120, w:170, h:48, style:'primary', mono:true, label:'slug\nauth-refactor' },
       { id:'sess', x:455, y:48,  w:200, h:46, style:'green', mono:true, label:'session name\nclaude -n <slug>' },
       { id:'tab',  x:455, y:120, w:200, h:46, style:'amber', mono:true, label:'tab title\nwezterm set-tab-title' },
       { id:'wt',   x:455, y:192, w:200, h:46, style:'purple',mono:true, label:'worktree / branch\n.claude/worktrees/' },

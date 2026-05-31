@@ -7,8 +7,8 @@ Output: 3–7 observations, each with type / title / text / domain-specific tags
 Plus a kebab label + 1–2 sentence summary for the session itself (reuses llm.py
 where possible so we don't duplicate the prompt + cache machinery).
 
-Topical-tag invariant: tags are domain identifiers (`AWAITING_CHECKIN`,
-`OperaPostCharge`, `kebab-labels`, `webhook-fix`), NEVER claude-mem's generic
+Topical-tag invariant: tags are domain identifiers (`HttpClient`,
+`RetryPolicy`, `kebab-labels`, `webhook-fix`), NEVER claude-mem's generic
 `how-it-works` / `what-changed` / `pattern` filler. The system prompt makes
 this explicit and the cache key includes that prompt so any tuning
 auto-invalidates.
@@ -37,7 +37,7 @@ OBSERVATIONS_SYSTEM = (
     "file names, library/tool names, kebab-case concepts. "
     "NEVER use generic tags like \"how-it-works\", \"what-changed\", \"pattern\", "
     "\"general\", \"session\", \"work\", \"task\". Prefer things like "
-    "AWAITING_CHECKIN, OperaPostCharge, kebab-labels, FastAPI, MiniLM, OXI, ZIF.\n\n"
+    "RetryPolicy, HttpClient, kebab-labels, FastAPI, MiniLM, JWT, SQL.\n\n"
     "Output ONLY the JSON array. No prose around it, no markdown fence."
 )
 
@@ -83,7 +83,7 @@ LESSONS_SYSTEM = (
     "outcome (those belong in per-session observations).\n\n"
     "Return a JSON ARRAY of objects, each with these exact keys:\n"
     "  - title: kebab-case (3–6 lowercase tokens joined by hyphens), e.g. "
-    "'oxi-keepalive-zombie-pattern', 'cancun-trace-format-prefix'\n"
+    "'connection-pool-exhaustion-fix', 'retry-backoff-jitter-pattern'\n"
     "  - text: 1–3 sentences capturing the durable fact, with the specific "
     "identifiers/systems/files involved\n"
     "  - tags: 3–6 DOMAIN-SPECIFIC tokens (acronyms, file/class names, ticket "
@@ -220,14 +220,14 @@ _GENERIC_TAGS = frozenset({
 # title/subtitle/narrative claude-mem already produced. Cheap, deterministic,
 # avoids burning a few dollars on a one-shot migration.
 _EXTRACT_PATTERNS = (
-    # CamelCase / PascalCase identifiers (e.g. OperaPostCharge, ChargeEvent)
+    # CamelCase / PascalCase identifiers (e.g. HttpClient, ChargeEvent)
     re.compile(r"\b([A-Z][a-zA-Z]+(?:[A-Z][a-zA-Z0-9_]+)+)\b"),
-    # All-caps acronyms with optional digits (e.g. OXI, ZIF, PUEGH, ZS-5953, AWS).
+    # All-caps acronyms with optional digits (e.g. API, SQL, TLS, ABC-123, AWS).
     # Stopword-checked below so SHOUTED English (RESIZE, READY, ABOUT) gets dropped.
     re.compile(r"\b([A-Z]{2,}(?:[_\-][A-Z0-9]+)*)\b"),
-    # kebab-case multi-word (e.g. opera-cloud, no-show-fallback) — at least one hyphen
+    # kebab-case multi-word (e.g. rate-limiting, cache-warmup) — at least one hyphen
     re.compile(r"\b([a-z]+(?:-[a-z]+){1,3})\b"),
-    # numeric IDs of 4+ digits (PMS ids, ticket numbers, ports, channel ids)
+    # numeric IDs of 4+ digits (record ids, ticket numbers, ports, channel ids)
     re.compile(r"\b(\d{4,})\b"),
     # snake_case / dotted identifiers / filenames — require an explicit `_` or `.`
     # in the body so plain English nouns ("window", "title", "session") can't sneak
@@ -298,7 +298,7 @@ def extract_topical_tags(*texts: Optional[str], max_tags: int = 5) -> list[str]:
                 # (AHEAD, ALWAYS, RESIZE) matches the CamelCase pattern too —
                 # its internal capitals satisfy the multi-group requirement — so
                 # the filter must run regardless of which pattern matched.
-                # Real acronyms (OXI, ZIF, BEM) and identifiers aren't stopwords,
+                # Real acronyms (API, SQL, JWT) and identifiers aren't stopwords,
                 # so they pass untouched.
                 if token.lower() in _TAG_STOPWORDS:
                     continue

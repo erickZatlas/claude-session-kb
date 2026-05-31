@@ -94,10 +94,10 @@ LABEL_SYSTEM = (
     "between 1 and 3 lowercase words joined by single hyphens. Prefer 2–3 words "
     "when two concepts are worth keeping (one specific + one generic = good); "
     "a single word is fine if one concept dominates. Real English words or known "
-    "acronyms (lowercased: oxi, zif, pms, tls, bem, ihg). Correct typos — never "
+    "acronyms (lowercased: api, sql, tls, jwt, cli, dns). Correct typos — never "
     "echo a misspelled token. "
-    "Examples: stuck-charges, opera-cloud, ihg-awaiting-checkin, no-show-fallback, "
-    "bimester, payment-reconciliation, oxi-outage, claude-mem-kb. "
+    "Examples: auth-refactor, cache-invalidation, flaky-tests, db-migration, "
+    "rate-limiting, webhook-retry, config-cleanup, recall-hook. "
     "Output only the label."
 )
 SUMMARY_SYSTEM = (

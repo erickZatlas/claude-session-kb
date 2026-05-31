@@ -17,8 +17,8 @@ Usage:
   --dry-run   show the planned edit without writing anything.
 
 Examples:
-  rename-session.py f3cdc10e oxi-outage-debrief
-  rename-session.py f3cdc10e-8cf0-428a-b25e-329ce6346081 oxi-outage-debrief --sync-kb
+  rename-session.py f3cdc10e auth-refactor-debrief
+  rename-session.py f3cdc10e-8cf0-428a-b25e-329ce6346081 auth-refactor-debrief --sync-kb
 """
 from __future__ import annotations
 
