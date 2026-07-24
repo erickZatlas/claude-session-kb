@@ -36,6 +36,7 @@ from fastapi.staticfiles import StaticFiles
 import llm
 import memory_ingest
 import observe
+import session_delete
 from embeddings import Embedder
 from store import Enricher, Store
 from store_capture import CaptureStore
@@ -348,6 +349,44 @@ def api_graph(project: str = "all"):
 def api_sessions(project: str = "all"):
     s = store.sessions if project == "all" else [x for x in store.sessions if x["project"] == project]
     return {"sessions": s}
+
+
+@app.delete("/api/sessions/{session_id}")
+def api_delete_session(session_id: str, purge: bool = False, force: bool = False):
+    """Delete a session: trash its transcript (reversible; --purge to unlink)
+    and drop its rows from our DB. Reuses session_delete.py — the same code the
+    CLI runs. After a delete we force a store.reload() (a delete shrinks the DB,
+    which ensure_fresh's grow-only check would miss) and compact the embedding
+    cache so the removed vectors don't linger in semantic search."""
+    try:
+        result = session_delete.delete_session(
+            session_id, purge=purge, sync_kb=True, dry_run=False, force=force,
+        )
+    except session_delete.SessionDeleteError as e:
+        msg = str(e)
+        # A live session is a conflict; everything else here is a bad request.
+        code = 409 if "looks live" in msg else 400
+        raise HTTPException(status_code=code, detail=msg)
+
+    store.reload()
+    with _sync_lock:
+        embedder.compact(set(store.rec_by_id))
+
+    t = result["transcript"]
+    if t.get("missing"):
+        transcript_status = "already-gone"
+    elif purge:
+        transcript_status = "purged"
+    else:
+        transcript_status = "trashed"
+    kb = result.get("kb") or {}
+    return {
+        "ok": True,
+        "sid": result["sid"],
+        "transcript": transcript_status,
+        "trashDir": t.get("dest_dir"),
+        "kbDeleted": kb.get("deleted"),
+    }
 
 
 # Phase E.C: ranking helpers for the recall hook.
