@@ -186,6 +186,9 @@ body.view-cards:not(.searching) #sort-chips { display: inline-flex; }
 .btn:hover { background: var(--sel); border-color: var(--accent); color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { background: #7af0dd; color: var(--accent-ink); }
+.btn.danger { border-color: #b4453a; color: #d9776c; }
+.btn.danger:hover { background: #b4453a; border-color: #b4453a; color: #fff; }
+.btn.danger.arm { background: #b4453a; border-color: #b4453a; color: #fff; }
 
 /* scrollbars */
 ::-webkit-scrollbar { width: 10px; height: 10px; }

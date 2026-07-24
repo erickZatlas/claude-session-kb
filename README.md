@@ -280,6 +280,7 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `GET  /api/search?q=&project=&kind=&mode=keyword\|semantic&session=&limit=` | ranked records |
 | `GET  /api/record/{id}` | one record + its session |
 | `GET  /api/sessions?project=` | sessions w/ kebab labels + LLM summaries + filesCount + worktree |
+| `DELETE /api/sessions/{sid}[?purge=true&force=true]` | delete a session: trash its transcript (reversible; `purge=true` unlinks) + cascade-delete its KB rows, then reload store + compact vectors. Refuses a live session (409) unless `force=true` |
 | `GET  /api/sessions/by-file?path=&limit=` | sessions that touched a file (suffix-matched) |
 | `GET  /api/graph?project=` | session-overview topology |
 | `GET  /api/recall?q=&limit=&min_score=&project=&exclude=&boost_project=` | semantic recall → `{sessions, lessons}` (sessions w/ decay + file boost + soft same-`boost_project` boost; `lessons` = top distilled lessons + auto-memory facts, gap-trimmed) |
@@ -316,8 +317,11 @@ Worker + recall tunables in env (read at request time — no restart needed):
 | `hooks/recall.py` | `UserPromptSubmit` hook — injects a lessons/memory block + related sessions |
 | `hooks/capture.py` | `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `Stop` hook dispatcher |
 | `scripts/rename-session.py` | Rename an old (closed) Claude Code session by editing its transcript JSONL + syncing the kb label |
+| `scripts/delete-session.py` | CLI to delete sessions: trash (default) or `--purge` the transcript + `--sync-kb` to drop DB rows; thin wrapper over `session_delete.py` |
+| `session_delete.py` | Shared core for session deletion (transcript trash/purge + KB cascade delete); used by the CLI, the `DELETE /api/sessions/{sid}` endpoint, and tests |
 | `scripts/backfill-worktree-projects.py` | One-shot: rewrite legacy sessions whose project was set to a worktree dir name |
 | `skills/rename-session/SKILL.md` | Skill definition the global Claude registry picks up |
+| `skills/delete-session/SKILL.md` | Skill for deleting old sessions from the CLI |
 | `static/index.html` | Explainer + teaching guide |
 | `static/kb.html` + `kb.js` + `theme.css` | The KB browser — cards + D3 force-graph + EventSource client |
 | `deploy/claude-session-kb.service` | systemd user-unit template (auto-start/restart the backend) |

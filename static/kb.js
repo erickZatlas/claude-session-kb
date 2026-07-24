@@ -644,6 +644,81 @@
       box.appendChild(btn);
     }
     d.appendChild(box);
+
+    if (s.id) d.appendChild(renderDeleteSession(s));
+  }
+
+  // Danger zone for a session drill-in. Two-step arm→confirm (no blocking
+  // native dialog): first click arms for 4s, second click within that window
+  // fires DELETE /api/sessions/{id}. The transcript is trashed (recoverable),
+  // not purged, matching the CLI default.
+  function renderDeleteSession(s) {
+    const wrap = el("div", "session-box");
+    wrap.style.marginTop = "10px";
+    wrap.appendChild(el("div", "sub", "Danger zone"));
+    const hint = el(
+      "div",
+      "body",
+      "Removes this session from the picker (transcript moved to ~/.claude-kb/trash, recoverable) and deletes its KB rows.",
+    );
+    hint.style.fontSize = "11px";
+    wrap.appendChild(hint);
+
+    const btn = el("button", "btn danger", "Delete session");
+    btn.style.marginTop = "8px";
+    let armed = false;
+    let armTimer = null;
+    const disarm = () => {
+      armed = false;
+      btn.classList.remove("arm");
+      btn.textContent = "Delete session";
+      if (armTimer) clearTimeout(armTimer);
+    };
+    btn.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        btn.classList.add("arm");
+        btn.textContent = "Click again to confirm";
+        armTimer = setTimeout(disarm, 4000);
+        return;
+      }
+      if (armTimer) clearTimeout(armTimer);
+      btn.disabled = true;
+      btn.textContent = "Deleting…";
+      try {
+        const r = await fetch("/api/sessions/" + encodeURIComponent(s.id), {
+          method: "DELETE",
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || `${r.status}`);
+        // Session is gone — drop the drill-in and reload the overview so the
+        // card disappears. Refresh counts + the session map from the server,
+        // then re-render.
+        sessByContentId.delete(s.id);
+        try {
+          meta = await api("/api/meta");
+          setCounts();
+          sessByContentId.clear();
+          const ss = await api("/api/sessions");
+          ss.sessions.forEach((x) => sessByContentId.set(x.id, x));
+        } catch (_) {
+          /* non-fatal — the drill-in still clears below */
+        }
+        clearSelection();
+        pushHistory();
+        refresh();
+      } catch (e) {
+        btn.disabled = false;
+        btn.classList.remove("arm");
+        btn.textContent = "Delete failed — retry";
+        const err = el("div", "body", String(e.message || e));
+        err.style.color = "#d9776c";
+        err.style.marginTop = "6px";
+        wrap.appendChild(err);
+      }
+    });
+    wrap.appendChild(btn);
+    return wrap;
   }
 
   function selectRecord(id) {
